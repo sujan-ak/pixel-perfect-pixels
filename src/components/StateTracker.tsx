@@ -46,7 +46,7 @@ export function StateTracker({ state }: { state: IncidentState | null }) {
             <motion.div
               key={s}
               animate={isCurrent ? { opacity: [1, 0.72, 1] } : { opacity: 1 }}
-              transition={isCurrent ? { duration: 1.8, repeat: Infinity, ease: "easeInOut" } : undefined}
+              transition={{ duration: 1.8, repeat: isCurrent ? Infinity : 0, ease: "easeInOut" }}
               className={cn(
                 "flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 font-mono text-[10px] tracking-wider transition-colors sm:text-[11px]",
                 isCurrent
