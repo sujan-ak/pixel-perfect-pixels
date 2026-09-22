@@ -34,7 +34,7 @@ export function useAuraShield() {
 
   const pushAudit = useCallback((actor: string, action: string) => {
     setAudit((prev) => {
-      const previous_hash = prev.length ? prev[prev.length - 1].current_hash : "0000...0000";
+      const previous_hash = prev.at(-1)?.current_hash ?? "0000...0000";
       auditId.current += 1;
       return [
         ...prev,
@@ -122,7 +122,7 @@ export function useAuraShield() {
               i === 0 ? "system" : "safety_governor",
               i === 0
                 ? `INCIDENT_CREATED: ${step.id}`
-                : `STATE_TRANSITION: ${seq[i - 1].state} -> ${step.state}`,
+                : `STATE_TRANSITION: ${seq[i - 1]?.state} -> ${step.state}`,
             );
             if (i === seq.length - 1) setBusy(false);
           }, i * 1400),
