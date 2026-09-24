@@ -1,0 +1,150 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * AuraShield Design System Tokens
+ * Control-room console: dense, high-trust, telemetry-forward, zero decorative filler.
+ */
+
+@theme inline {
+  --color-bg-void: var(--bg-void);
+  --color-bg-panel: var(--bg-panel);
+  --color-bg-panel-raised: var(--bg-panel-raised);
+  --color-line: var(--line);
+  --color-text-primary: var(--text-primary);
+  --color-text-muted: var(--text-muted);
+  --color-signal-pending: var(--signal-pending);
+  --color-signal-verified: var(--signal-verified);
+  --color-signal-rejected: var(--signal-rejected);
+  --color-signal-data: var(--signal-data);
+  --color-signal-closed: var(--signal-closed);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --font-sans: var(--font-sans-stack);
+  --font-mono: var(--font-mono-stack);
+
+  --text-hero-score: 32px;
+  --text-hero-score--line-height: 36px;
+  --text-hero-score--letter-spacing: -0.02em;
+  --text-panel-header: 18px;
+  --text-panel-header--line-height: 24px;
+  --text-panel-header--font-weight: 600;
+  --text-body: 14px;
+  --text-body--line-height: 20px;
+  --text-label: 12px;
+  --text-label--line-height: 16px;
+}
+
+:root {
+  --radius: 4px;
+
+  /* Functional Tokens */
+  --bg-void: #0A0E14;
+  --bg-panel: #10151D;
+  --bg-panel-raised: #161C26;
+  --line: #232B38;
+  --text-primary: #E7ECF3;
+  --text-muted: #7C8798;
+  --signal-pending: #F5A623;
+  --signal-verified: #3DDC84;
+  --signal-rejected: #FF5C5C;
+  --signal-data: #22D3EE;
+  --signal-closed: #4B5563;
+
+  /* Semantic mappings for standard elements */
+  --background: var(--bg-void);
+  --foreground: var(--text-primary);
+  --panel: var(--bg-panel);
+  --card: var(--bg-panel);
+  --card-foreground: var(--text-primary);
+  --popover: var(--bg-panel);
+  --popover-foreground: var(--text-primary);
+  --primary: var(--signal-verified);
+  --primary-foreground: var(--bg-void);
+  --secondary: var(--bg-panel-raised);
+  --secondary-foreground: var(--text-primary);
+  --muted: var(--bg-panel-raised);
+  --muted-foreground: var(--text-muted);
+  --border: var(--line);
+  --input: var(--line);
+  --ring: var(--signal-data);
+
+  --font-sans-stack: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono-stack: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+
+  body {
+    background-color: var(--bg-void);
+    color: var(--text-primary);
+    font-family: var(--font-sans-stack);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Keyboard accessibility */
+  :focus-visible {
+    outline: 2px solid var(--signal-data);
+    outline-offset: 1px;
+  }
+}
+
+@utility panel {
+  background-color: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+@utility panel-raised {
+  background-color: var(--bg-panel-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+@utility hairline {
+  border: 1px solid var(--line);
+}
+
+@utility scanlines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 2px,
+    rgba(10, 14, 20, 0.45) 3px
+  );
+}
+
+/* Hash glow flash for new audit rows */
+@keyframes hashFlash {
+  0% {
+    background-color: rgba(61, 220, 132, 0.18);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.audit-row-enter {
+  animation: hashFlash 1.2s ease-out forwards;
+}
