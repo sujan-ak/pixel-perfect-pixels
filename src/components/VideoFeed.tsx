@@ -1,4 +1,5 @@
-import { Radio } from "lucide-react";
+import { useState, useEffect } from "react";
+import { AlertTriangle, Radio } from "lucide-react";
 import crashPoster from "@/assets/crash_zone04.jpg";
 import falseAlarmPoster from "@/assets/false_alarm.jpg";
 import type { Incident, IncidentState } from "@/lib/aurashield/types";
@@ -56,20 +57,42 @@ function getStateBadgeClass(state: IncidentState): string {
 export function VideoFeed({ incident }: { incident: Incident | null }) {
   const mediaFile = incident?.media_file;
   const poster = mediaFile ? POSTERS[mediaFile] : undefined;
+  const [videoError, setVideoError] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  useEffect(() => {
+    setVideoError(false);
+    setIsPlaying(false);
+  }, [mediaFile]);
 
   return (
     <div className="relative aspect-video w-full overflow-hidden rounded bg-bg-panel border border-line">
       {mediaFile ? (
-        <video
-          key={mediaFile}
-          className="h-full w-full object-cover"
-          src={`/media/${mediaFile}`}
-          poster={poster}
-          autoPlay
-          muted
-          loop
-          playsInline
-        />
+        videoError ? (
+          <img
+            key={`poster-${mediaFile}`}
+            src={poster}
+            alt={incident?.zone ?? "Camera Feed"}
+            className="h-full w-full object-cover opacity-80"
+          />
+        ) : (
+          <video
+            key={mediaFile}
+            className="h-full w-full object-cover"
+            src={`/media/${mediaFile}`}
+            poster={poster}
+            autoPlay
+            muted
+            loop
+            playsInline
+            onError={() => {
+              setVideoError(true);
+              setIsPlaying(false);
+            }}
+            onPlaying={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+          />
+        )
       ) : (
         <div className="flex h-full w-full flex-col items-center justify-center p-6 text-center">
           <p className="font-sans text-body text-text-muted">
@@ -81,9 +104,9 @@ export function VideoFeed({ incident }: { incident: Incident | null }) {
       {/* Subtle scanline overlay for camera sensor texture */}
       <div className="pointer-events-none absolute inset-0 scanlines opacity-50" />
 
-      {/* Top-Left: System state badge */}
-      {incident && (
-        <div className="absolute left-3 top-3 flex items-center gap-2">
+      {/* Top-Left: System state badge & Live/No Signal Status */}
+      <div className="absolute left-3 top-3 flex items-center gap-2">
+        {incident && (
           <span
             className={`flex items-center gap-1.5 rounded border px-2 py-0.5 font-sans text-label font-medium ${getStateBadgeClass(
               incident.state
@@ -102,8 +125,23 @@ export function VideoFeed({ incident }: { incident: Incident | null }) {
             />
             {formatStateLabel(incident.state)}
           </span>
-        </div>
-      )}
+        )}
+
+        {/* Live feed vs NO SIGNAL fallback badge */}
+        {mediaFile && (
+          videoError || !isPlaying ? (
+            <span className="flex items-center gap-1 rounded border border-signal-pending/60 bg-signal-pending/15 px-2 py-0.5 font-mono text-label font-medium text-signal-pending">
+              <AlertTriangle className="h-3 w-3" />
+              <span>NO SIGNAL · STILL POSTER</span>
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 rounded border border-signal-verified/60 bg-signal-verified/15 px-2 py-0.5 font-mono text-label font-medium text-signal-verified">
+              <span className="h-1.5 w-1.5 rounded-full bg-signal-verified animate-pulse" />
+              <span>LIVE</span>
+            </span>
+          )
+        )}
+      </div>
 
       {/* Top-Right: Zone Telemetry */}
       <div className="absolute right-3 top-3 flex items-center gap-1.5 rounded border border-line bg-bg-panel/90 px-2 py-0.5 font-mono text-label text-text-primary">

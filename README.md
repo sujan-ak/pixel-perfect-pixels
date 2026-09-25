@@ -1,24 +1,17 @@
-# Pixel Perfect Pixels
+# AuraShield Dashboard & Operator Console
 
-Implement exactly the screenshot and nothing else
-
-This project was built with [Lovable](https://lovable.dev).
-
-## Build with Lovable
-
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/821fe9db-af1c-4350-8ae6-699f2480f80c).
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
+The real-time incident adjudication control room for AuraShield. Built with Vite, React, TypeScript, TailwindCSS, and Framer Motion.
 
 ## Development
 
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
-
-```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
+```bash
+npm install
 npm run dev
 ```
+
+For production build:
+```bash
+npm run build
+```
+
+See root [README.md](../README.md), [RESPONSIBLE_AI.md](../RESPONSIBLE_AI.md), and [ARCHITECTURE.md](../ARCHITECTURE.md) for full system documentation.

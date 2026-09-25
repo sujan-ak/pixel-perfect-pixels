@@ -4,16 +4,16 @@ import type { Incident } from "@/lib/aurashield/types";
 
 const FUSED_THRESHOLD = 0.35;
 const CONFIDENCE_THRESHOLD = 0.8;
-const MARGIN_THRESHOLD = 0.35;
 
 export function AgentTugOfWar({ incident }: { incident: Incident | null }) {
   const corroborator = incident?.corroborator_score ?? 0;
   const skeptic = incident?.skeptic_score ?? 0;
   const fused = incident?.fused_score ?? 0;
-  const margin = corroborator - skeptic;
-  const total = corroborator + skeptic || 1;
-  const pull = (corroborator / total) * 100;
-  const thresholdMet = fused > FUSED_THRESHOLD && corroborator >= CONFIDENCE_THRESHOLD;
+  const confidence = incident?.confidence ?? 0.9;
+  // Unified -1..+1 scale mapped to 0..100%
+  const barPercent = Math.max(0, Math.min(100, ((fused + 1) / 2) * 100));
+  const markerPercent = ((FUSED_THRESHOLD + 1) / 2) * 100; // 67.5%
+  const thresholdMet = fused > FUSED_THRESHOLD && confidence >= CONFIDENCE_THRESHOLD;
 
   return (
     <div className="flex h-full flex-col justify-between rounded border border-line bg-bg-panel p-4">
@@ -67,30 +67,37 @@ export function AgentTugOfWar({ incident }: { incident: Incident | null }) {
         </div>
       </div>
 
-      {/* Bidirectional Tug-of-War Bar (Corroborator pushes right, Skeptic pushes left) */}
+      {/* Bidirectional Tug-of-War Bar on unified -1..+1 scale */}
       <div className="space-y-1.5">
         <div className="relative h-6 overflow-hidden rounded border border-line bg-bg-void">
-          {/* Center line at 50% balance mark */}
+          {/* Center line at 50% balance mark (fused = 0) */}
           <div className="absolute inset-y-0 left-1/2 z-10 w-px bg-line" />
 
-          {/* Skeptic fill pushing from left */}
-          <motion.div
-            className="absolute inset-y-0 left-0 bg-signal-rejected/30 border-r border-signal-rejected"
-            animate={{ width: `${100 - pull}%` }}
-            transition={{ type: "spring", stiffness: 120, damping: 14, restDelta: 0.001 }}
+          {/* Dashed threshold marker at ((0.35 + 1) / 2) * 100 = 67.5% */}
+          <div
+            className="absolute inset-y-0 z-10 w-0 border-r-2 border-dashed border-signal-verified/90"
+            style={{ left: `${markerPercent}%` }}
+            title="Verification Threshold (fused > 0.35)"
           />
 
-          {/* Corroborator fill pushing from right */}
+          {/* Fill on unified scale: pushes from center 50% toward barPercent */}
           <motion.div
-            className="absolute inset-y-0 right-0 bg-signal-verified/30 border-l border-signal-verified"
-            animate={{ width: `${pull}%` }}
+            className={`absolute inset-y-0 ${
+              fused >= 0
+                ? "bg-signal-verified/30 border-r border-signal-verified"
+                : "bg-signal-rejected/30 border-l border-signal-rejected"
+            }`}
+            animate={{
+              left: fused >= 0 ? "50%" : `${barPercent}%`,
+              width: `${Math.abs(barPercent - 50)}%`,
+            }}
             transition={{ type: "spring", stiffness: 120, damping: 14, restDelta: 0.001 }}
           />
 
           {/* Center dynamic needle */}
           <motion.div
             className="absolute inset-y-0 z-20 w-1 bg-text-primary"
-            animate={{ left: `calc(${pull}% - 2px)` }}
+            animate={{ left: `calc(${barPercent}% - 2px)` }}
             transition={{ type: "spring", stiffness: 120, damping: 14, restDelta: 0.001 }}
           />
         </div>
@@ -98,13 +105,13 @@ export function AgentTugOfWar({ incident }: { incident: Incident | null }) {
         {/* Telemetry criteria labels */}
         <div className="flex justify-between font-mono text-label text-text-muted">
           <span>
-            Margin:{" "}
+            Confidence:{" "}
             <span className={incident ? "text-signal-data" : "text-text-muted"}>
-              {incident ? margin.toFixed(2) : "—"}
+              {incident ? confidence.toFixed(2) : "—"}
             </span>{" "}
-            (req &gt; {MARGIN_THRESHOLD})
+            (req &ge; {CONFIDENCE_THRESHOLD.toFixed(2)})
           </span>
-          <span>Fused req &ge; {FUSED_THRESHOLD.toFixed(2)}</span>
+          <span>Fused req &gt; {FUSED_THRESHOLD.toFixed(2)} (gate: 67.5%)</span>
         </div>
       </div>
 

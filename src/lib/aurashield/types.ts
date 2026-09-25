@@ -19,6 +19,7 @@ export interface Incident {
   corroborator_score: number;
   skeptic_score: number;
   fused_score: number;
+  confidence?: number;
   reasoning: string;
   media_file: string;
   timestamp: string;
@@ -54,5 +55,7 @@ export interface ChainVerifyResponse {
 export type ScenarioKey = "crash_zone04" | "false_alarm";
 
 export type WsMessage =
-  | { type: "incident_update"; incident: Incident }
-  | { type: "audit_entry"; entry: AuditEntry };
+  | { type: "incident_update"; incident: Incident; degraded?: boolean }
+  | { type: "audit_entry"; entry: AuditEntry }
+  | { type: "agent_reasoning_chunk"; agent: "CORROBORATOR" | "SKEPTIC" | "GOVERNOR"; text: string; done?: boolean }
+  | { type: "audit_sync"; entries: AuditEntry[] };

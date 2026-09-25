@@ -9,9 +9,11 @@ from fastapi import WebSocket, WebSocketDisconnect
 from agents.verification import (
     SCENARIO_FIXTURES,
     assert_terminal_state_matches,
+    compute_fused_score,
     generate_reasoning,
+    get_real_scores,
 )
-from database.audit import AuditDatabase, AuditEntry, Incident
+from database import DatabaseBackend, AuditEntry, Incident
 
 logger = logging.getLogger("aurashield.core.state_machine")
 
@@ -84,17 +86,36 @@ class ConnectionManager:
 
 
 class IncidentOrchestrator:
-    def __init__(self, db: AuditDatabase, connection_manager: ConnectionManager) -> None:
+    def __init__(self, db: DatabaseBackend, connection_manager: ConnectionManager) -> None:
         self.db = db
         self.connection_manager = connection_manager
         self.active_tasks: Dict[str, asyncio.Task] = {}
         self.incident_counter: int = 0
         self.last_scenario_times: Dict[str, float] = {}
         self.running_scenarios: Dict[str, str] = {}  # scenario -> incident_id
+        self.governor_sensitivity: float = float(os.getenv("GOVERNOR_SENSITIVITY", "0.65"))
+        self.automation_paused: bool = False
         self._lock = asyncio.Lock()
+
+    async def stream_agent_reasoning(self, agent: str, text: str) -> None:
+        try:
+            await self.connection_manager.broadcast_json({
+                "type": "agent_reasoning_chunk",
+                "agent": agent,
+                "text": text,
+                "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            })
+        except Exception as e:
+            logger.warning("Failed to stream reasoning chunk: %s", e)
 
     async def get_next_incident_id(self) -> str:
         async with self._lock:
+            try:
+                history = await self.db.get_incident_history()
+                max_num = max([int(inc.id.split("_")[1]) for inc in history if inc.id.startswith("inc_") and inc.id.split("_")[1].isdigit()] or [0])
+                self.incident_counter = max(self.incident_counter, max_num)
+            except Exception:
+                pass
             self.incident_counter += 1
             return f"inc_{self.incident_counter:03d}"
 
@@ -130,12 +151,14 @@ class IncidentOrchestrator:
             self.active_tasks.pop(incident_id, None)
             self.running_scenarios.pop(scenario, None)
             self.last_scenario_times[scenario] = time.time()
-            if t.exception():
-                logger.error(
-                    "Pipeline for incident %s failed with exception: %s",
-                    incident_id,
-                    t.exception(),
-                )
+            if not t.cancelled():
+                exc = t.exception()
+                if exc:
+                    logger.error(
+                        "Pipeline for incident %s failed with exception: %s",
+                        incident_id,
+                        exc,
+                    )
 
         task.add_done_callback(cleanup_task)
         return incident_id
@@ -153,11 +176,60 @@ class IncidentOrchestrator:
 
         logger.info("Starting scenario pipeline for %s (%s, %s)", incident_id, scenario, zone)
 
+        fallback_corr = steps[-1]["corroborator_score"]
+        fallback_skep = steps[-1]["skeptic_score"]
+
+        # Call get_real_scores ONCE at start of pipeline
+        real_corr, real_skep, confidence, degraded, corr_evidence, skep_evidence, provider_summary = (
+            await get_real_scores(
+                scenario=scenario,
+                fallback_corr=fallback_corr,
+                fallback_skep=fallback_skep,
+            )
+        )
+        logger.info(
+            "Adversarial scoring for %s: corr=%.2f, skep=%.2f, conf=%.2f, degraded=%s, provider=%s",
+            scenario,
+            real_corr,
+            real_skep,
+            confidence,
+            degraded,
+            provider_summary,
+        )
+
+        corr_prov, skep_prov = provider_summary.split("+") if "+" in provider_summary else (provider_summary, provider_summary)
+        await self.stream_agent_reasoning("CORROBORATOR", f"Initiating advocate analysis for {zone} (engine: {corr_prov})...")
+        for ev in corr_evidence:
+            await asyncio.sleep(0.06)
+            await self.stream_agent_reasoning("CORROBORATOR", f"{ev} [Advocate Score: {real_corr:.2f}]")
+
+        await self.stream_agent_reasoning("SKEPTIC", f"Auditing telemetry against optical noise, glare, mount vibration (engine: {skep_prov})...")
+        for ev in skep_evidence:
+            await asyncio.sleep(0.06)
+            await self.stream_agent_reasoning("SKEPTIC", f"{ev} [Skeptic Score: {real_skep:.2f}]")
+
+        final_fused = compute_fused_score(real_corr, real_skep)
+        sensitivity_thresh = self.governor_sensitivity
+        is_verified_by_gov = (final_fused > 0.35 and confidence >= sensitivity_thresh)
+        gov_summary = (
+            f"Dual-model fusion complete: Fused {final_fused:+.2f} | Confidence {confidence:.2f} "
+            f"(Threshold: {sensitivity_thresh:.2f}) -> {'VERIFIED FOR DISPATCH' if is_verified_by_gov else 'REJECTED AS FALSE ALARM'}"
+        )
+        await self.stream_agent_reasoning("GOVERNOR", gov_summary)
+
         for i, step in enumerate(steps):
             if i > 0:
                 await asyncio.sleep(1.4)
 
-            new_state = step["state"]
+            raw_state = step["state"]
+            # Dynamic sensitivity flip: if step is reaching VERIFIED or REJECTED, gate by governor
+            if raw_state in ("VERIFIED", "RESPONSE_PROPOSED"):
+                new_state = raw_state if is_verified_by_gov else "REJECTED"
+            elif raw_state == "REJECTED":
+                new_state = "REJECTED"
+            else:
+                new_state = raw_state
+
             if not is_valid_transition(prev_state, new_state):
                 logger.error(
                     "Illegal transition attempted for %s: %s -> %s",
@@ -165,7 +237,6 @@ class IncidentOrchestrator:
                     prev_state,
                     new_state,
                 )
-                # Still log and proceed gracefully with fixture for demo resilience
             else:
                 logger.info(
                     "Transition for %s: %s -> %s",
@@ -174,12 +245,26 @@ class IncidentOrchestrator:
                     new_state,
                 )
 
+            # Interpolate towards real LLM scores
+            if new_state == "OBSERVED":
+                corr = round(real_corr * 0.22, 2)
+                skep = round(real_skep * 0.40, 2)
+            elif new_state == "CANDIDATE":
+                corr = round(real_corr * 0.71, 2)
+                skep = round(real_skep * 0.80, 2)
+            else:
+                corr = real_corr
+                skep = real_skep
+
+            fused = compute_fused_score(corr, skep)
+
             # Self-check assertion on final step
             if i == len(steps) - 1:
                 assert_terminal_state_matches(
                     fixture_state=new_state,
-                    corroborator_score=step["corroborator_score"],
-                    skeptic_score=step["skeptic_score"],
+                    corroborator_score=corr,
+                    skeptic_score=skep,
+                    confidence=confidence,
                 )
 
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -188,23 +273,28 @@ class IncidentOrchestrator:
                 state=new_state,
                 scenario=scenario,
                 zone=zone,
-                corroborator_score=step["corroborator_score"],
-                skeptic_score=step["skeptic_score"],
-                fused_score=step["fused_score"],
+                corroborator_score=corr,
+                skeptic_score=skep,
+                fused_score=fused,
                 fallback=step["reasoning"],
             )
+
+            if degraded and not reasoning.endswith("[FALLBACK SCORING]"):
+                reasoning = f"{reasoning} [FALLBACK SCORING]"
 
             incident = Incident(
                 id=incident_id,
                 state=new_state,
                 zone=zone,
                 scenario=scenario,
-                corroborator_score=step["corroborator_score"],
-                skeptic_score=step["skeptic_score"],
-                fused_score=step["fused_score"],
+                corroborator_score=corr,
+                skeptic_score=skep,
+                fused_score=fused,
+                confidence=confidence,
                 reasoning=reasoning,
                 media_file=media_file,
                 timestamp=now_iso,
+                degraded=degraded,
             )
 
             # Persist incident
@@ -212,29 +302,124 @@ class IncidentOrchestrator:
 
             # Broadcast incident_update
             await self.connection_manager.broadcast_json(
-                {"type": "incident_update", "incident": incident.model_dump()}
+                {
+                    "type": "incident_update",
+                    "incident": incident.model_dump(),
+                    "degraded": degraded,
+                }
             )
 
             # Paired audit entry
             if i == 0:
                 actor = "system"
                 action = f"INCIDENT_CREATED: {incident_id}"
+                audit_entry = await self.db.append_audit_entry(
+                    actor=actor, action=action, timestamp=now_iso
+                )
+                await self.connection_manager.broadcast_json(
+                    {"type": "audit_entry", "entry": audit_entry.model_dump()}
+                )
+
+                # Log both agents' full evidence arrays as their own entries
+                corr_ev_text = corr_evidence[0] if corr_evidence else "telemetry match"
+                skep_ev_text = skep_evidence[0] if skep_evidence else "telemetry review"
+
+                corr_audit = await self.db.append_audit_entry(
+                    actor="corroborator_agent",
+                    action=f"SCORED: {real_corr} ({corr_prov}) — {corr_ev_text}",
+                    timestamp=now_iso,
+                )
+                await self.connection_manager.broadcast_json(
+                    {"type": "audit_entry", "entry": corr_audit.model_dump()}
+                )
+
+                skep_audit = await self.db.append_audit_entry(
+                    actor="skeptic_agent",
+                    action=f"SCORED: {real_skep} ({skep_prov}) — {skep_ev_text}",
+                    timestamp=now_iso,
+                )
+                await self.connection_manager.broadcast_json(
+                    {"type": "audit_entry", "entry": skep_audit.model_dump()}
+                )
             else:
                 actor = "safety_governor"
                 action = f"STATE_TRANSITION: {prev_state} -> {new_state}"
-
-            audit_entry = await self.db.append_audit_entry(
-                actor=actor, action=action, timestamp=now_iso
-            )
-            await self.connection_manager.broadcast_json(
-                {"type": "audit_entry", "entry": audit_entry.model_dump()}
-            )
+                audit_entry = await self.db.append_audit_entry(
+                    actor=actor, action=action, timestamp=now_iso
+                )
+                await self.connection_manager.broadcast_json(
+                    {"type": "audit_entry", "entry": audit_entry.model_dump()}
+                )
 
             prev_state = new_state
 
+            # If scenario got rejected by sensitivity gate, stop pipeline here
+            if new_state == "REJECTED":
+                break
+
+        if prev_state == "RESPONSE_PROPOSED" and self.automation_paused:
+            await self.stream_agent_reasoning(
+                "GOVERNOR", "AUTOMATION PAUSED BY OPERATOR: incident awaiting manual clearance or resume."
+            )
+
         logger.info("Completed scenario pipeline for %s (%s)", incident_id, scenario)
 
+    async def override_reject_incident(
+        self, incident_id: str, reason: str = "Operator manual override: marked as false positive"
+    ) -> dict:
+        incident = await self.db.get_incident_by_id(incident_id)
+        if not incident:
+            raise KeyError(f"Incident {incident_id} not found")
+
+        # Cancel active task if running
+        task = self.active_tasks.get(incident_id)
+        if task and not task.done():
+            task.cancel()
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Emit audit entry
+        action_str = f"OPERATOR_OVERRIDE_REJECT: {incident.id} — {reason}"
+        audit_entry = await self.db.append_audit_entry(
+            actor="operator_1",
+            action=action_str,
+            timestamp=now_iso,
+        )
+        await self.connection_manager.broadcast_json(
+            {"type": "audit_entry", "entry": audit_entry.model_dump()}
+        )
+
+        updated_incident = Incident(
+            id=incident.id,
+            state="REJECTED",
+            zone=incident.zone,
+            scenario=incident.scenario,
+            corroborator_score=incident.corroborator_score,
+            skeptic_score=incident.skeptic_score,
+            fused_score=incident.fused_score,
+            confidence=incident.confidence,
+            reasoning=f"REJECTED: Operator manual override — {reason}",
+            media_file=incident.media_file,
+            timestamp=now_iso,
+            degraded=incident.degraded,
+        )
+        await self.db.save_incident(updated_incident)
+        await self.connection_manager.broadcast_json(
+            {"type": "incident_update", "incident": updated_incident.model_dump()}
+        )
+
+        await self.stream_agent_reasoning(
+            "GOVERNOR",
+            f"OVERRIDE: Operator rejected incident {incident_id} ({reason}). State -> REJECTED.",
+        )
+        return {"status": "rejected", "incident_id": incident_id, "reason": reason}
+
     async def approve_incident(self, incident_id: str) -> dict:
+        if self.automation_paused:
+            raise ValueError(
+                f"Automation is paused by operator. Unpause automation to approve incident {incident_id}."
+            )
+
         incident = await self.db.get_incident_by_id(incident_id)
         if not incident:
             raise KeyError(f"Incident {incident_id} not found")

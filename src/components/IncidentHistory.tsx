@@ -98,7 +98,7 @@ export function IncidentHistory({ currentIncidentState }: { currentIncidentState
                       {formatStateLabel(item.state as IncidentState)}
                     </span>
                   </td>
-                  <td className="py-1.5 px-2 text-signal-data font-medium">
+                  <td className="py-1.5 px-2 text-text-primary font-medium">
                     {item.fused_score > 0 ? `+${item.fused_score.toFixed(2)}` : item.fused_score.toFixed(2)}
                   </td>
                   <td className="py-1.5 pl-2 pr-4 text-right text-text-muted">

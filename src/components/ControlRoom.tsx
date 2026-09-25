@@ -14,6 +14,9 @@ import {
 import { AgentTugOfWar } from "./AgentTugOfWar";
 import { AuditLedger } from "./AuditLedger";
 import { IncidentHistory } from "./IncidentHistory";
+import { OperatorControlBar } from "./OperatorControlBar";
+import { LiveMap } from "./LiveMap";
+import { ReasoningTerminal } from "./ReasoningTerminal";
 import { StateTracker } from "./StateTracker";
 import { VideoFeed } from "./VideoFeed";
 import { useAuraShield } from "@/lib/aurashield/useAuraShield";
@@ -32,7 +35,17 @@ export function ControlRoom() {
     triggerScenario,
     approveDispatch,
     verifyChain,
+    tamperDemo,
+    restoreDemo,
     reset,
+    reasoningLogs,
+    isStreaming,
+    automationPaused,
+    setAutomationPaused,
+    governorSensitivity,
+    setGovernorSensitivity,
+    overrideReject,
+    clearReasoningLogs,
   } = useAuraShield();
 
   const [utcTime, setUtcTime] = useState("");
@@ -68,6 +81,15 @@ export function ControlRoom() {
 
         {/* Status & Live Telemetry Clock */}
         <div className="flex items-center gap-3">
+          {/* Pulsing Green Status LED: SYSTEM ACTIVE */}
+          <div className="flex items-center gap-2 rounded border border-signal-verified/40 bg-signal-verified/10 px-2.5 py-1 font-mono text-label font-medium text-signal-verified">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal-verified opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-signal-verified" />
+            </span>
+            <span>SYSTEM ACTIVE</span>
+          </div>
+
           {/* Live UTC Clock */}
           <div className="hidden sm:flex items-center gap-1.5 rounded border border-line bg-bg-void px-2.5 py-1 font-mono text-label text-text-muted">
             <Clock className="h-3.5 w-3.5 text-text-muted" />
@@ -174,6 +196,29 @@ export function ControlRoom() {
           </div>
         </div>
 
+        {/* Operator Controls: Automation pause, Reject override, Sensitivity slider */}
+        <OperatorControlBar
+          automationPaused={automationPaused}
+          onTogglePause={() => setAutomationPaused(!automationPaused)}
+          incident={incident}
+          onOverrideReject={overrideReject}
+          canReject={Boolean(
+            incident &&
+            incident.state !== "REJECTED" &&
+            incident.state !== "CLOSED"
+          )}
+          sensitivity={governorSensitivity}
+          onSensitivityChange={setGovernorSensitivity}
+          busy={busy}
+        />
+
+        {/* Live Adversarial Streaming Reasoning Terminal */}
+        <ReasoningTerminal
+          logs={reasoningLogs}
+          isStreaming={isStreaming}
+          onClear={clearReasoningLogs}
+        />
+
         {/* Awaiting Operator Clearance Decision Banner */}
         <AnimatePresence>
           {awaitingClearance && (
@@ -197,18 +242,38 @@ export function ControlRoom() {
 
               <button
                 onClick={approveDispatch}
-                disabled={busy}
+                disabled={busy || automationPaused}
                 className="flex items-center gap-2 rounded bg-signal-verified px-5 py-2 font-sans text-body font-semibold text-bg-void transition-opacity hover:opacity-90 disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-signal-data"
               >
-                <span>Approve dispatch</span>
+                <span>{automationPaused ? "Automation paused" : "Approve dispatch"}</span>
               </button>
             </motion.div>
           )}
         </AnimatePresence>
 
+        {/* Geospatial Control: Hyderabad Leaflet Map & Green Corridor Actuation */}
+        <LiveMap
+          incident={incident}
+          isApproved={Boolean(
+            incident &&
+              ["OPERATOR_APPROVED", "COORDINATION_IN_PROGRESS", "ACKNOWLEDGED", "CLOSED"].includes(
+                incident.state,
+              ),
+          )}
+          onSignalActuated={() => {
+            verifyChain();
+          }}
+        />
+
         {/* 3. Bottom Zone: Immutable Monospace Audit Ledger */}
         <div>
-          <AuditLedger entries={audit} chain={chain} onVerify={verifyChain} />
+          <AuditLedger
+            entries={audit}
+            chain={chain}
+            onVerify={verifyChain}
+            onTamper={tamperDemo}
+            onRestore={restoreDemo}
+          />
         </div>
 
         {/* 4. Incident History Panel (Compact records from GET /incidents/history) */}

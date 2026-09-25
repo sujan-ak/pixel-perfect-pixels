@@ -62,6 +62,8 @@ export function StateTracker({ state }: { state: IncidentState | null }) {
           const activeColor =
             s === "OBSERVED" || s === "CANDIDATE"
               ? "border-signal-pending text-signal-pending bg-signal-pending/10"
+              : s === "ACKNOWLEDGED" || s === "CLOSED"
+              ? "border-signal-closed text-text-muted bg-signal-closed/10"
               : "border-signal-verified text-signal-verified bg-signal-verified/10";
 
           return (
@@ -96,6 +98,8 @@ export function StateTracker({ state }: { state: IncidentState | null }) {
                       isCurrent
                         ? s === "OBSERVED" || s === "CANDIDATE"
                           ? "bg-signal-pending animate-pulse"
+                          : s === "CLOSED" || s === "ACKNOWLEDGED"
+                          ? "bg-signal-closed"
                           : "bg-signal-verified animate-pulse"
                         : "bg-line"
                     }`}
