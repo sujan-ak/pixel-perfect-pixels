@@ -9,6 +9,7 @@ from .interface import (
     AuditEntry,
     ChainVerifyResponse,
     DatabaseBackend,
+    EmergencyNotification,
     Incident,
     compute_short_hash,
     GENESIS_HASH,
@@ -401,3 +402,81 @@ class SupabaseBackend(DatabaseBackend):
                     )
                 )
             return incidents
+
+    async def record_notification(self, notif: EmergencyNotification) -> EmergencyNotification:
+        if not self.pool:
+            notif.id = 1
+            return notif
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO emergency_notifications (
+                        incident_id, notification_type, recipient, channel, trigger_event,
+                        timestamp, status, message_body, provider_id, error_message
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    RETURNING id;
+                    """,
+                    notif.incident_id,
+                    notif.notification_type,
+                    notif.recipient,
+                    notif.channel,
+                    notif.trigger_event,
+                    notif.timestamp,
+                    notif.status,
+                    notif.message_body,
+                    notif.provider_id,
+                    notif.error_message,
+                )
+                if row:
+                    notif.id = row["id"]
+        except Exception as e:
+            logger.warning("Could not persist notification in Supabase: %s", e)
+            notif.id = 1
+        return notif
+
+    async def get_notifications_for_incident(
+        self, incident_id: str, notification_type: Optional[str] = None
+    ) -> List[EmergencyNotification]:
+        if not self.pool:
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                if notification_type:
+                    rows = await conn.fetch(
+                        """
+                        SELECT * FROM emergency_notifications
+                        WHERE incident_id = $1 AND notification_type = $2
+                        ORDER BY id ASC;
+                        """,
+                        incident_id,
+                        notification_type,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        """
+                        SELECT * FROM emergency_notifications
+                        WHERE incident_id = $1
+                        ORDER BY id ASC;
+                        """,
+                        incident_id,
+                    )
+                return [
+                    EmergencyNotification(
+                        id=row["id"],
+                        incident_id=row["incident_id"],
+                        notification_type=row["notification_type"],
+                        recipient=row["recipient"],
+                        channel=row["channel"],
+                        trigger_event=row["trigger_event"],
+                        timestamp=str(row["timestamp"]),
+                        status=row["status"],
+                        message_body=row["message_body"],
+                        provider_id=row["provider_id"],
+                        error_message=row["error_message"],
+                    )
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.warning("Could not fetch notifications from Supabase: %s", e)
+            return []

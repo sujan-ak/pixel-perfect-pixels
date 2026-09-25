@@ -14,6 +14,12 @@ from agents.verification import (
     get_real_scores,
 )
 from core.city import CityTwin
+from core.notifications import (
+    dispatch_police_notification,
+    dispatch_hospital_notification,
+    get_police_recipient,
+    build_police_notification_message,
+)
 from database import DatabaseBackend, AuditEntry, Incident
 
 logger = logging.getLogger("aurashield.core.state_machine")
@@ -539,80 +545,28 @@ class IncidentOrchestrator:
         self.acknowledgements = []
         self.ack_deadline_ms = int(time.time() * 1000) + 20000
 
-        police_to = os.getenv("TWILIO_DISPATCH_TO") or "+917893910211"
-        whatsapp_from = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
-        police_body = (
-            f"🚨 POLICE ALERT: Collision at {incident.zone} (MJ Market / NH-44) | "
-            f"Severity: {incident.corroborator_score:.2f} | Incident ID: {incident.id} | "
-            f"Response: Dispatch approved. Green corridor actuated."
+        # Police Emergency Notification (idempotent, dynamic location and severity)
+        location_label = f"{incident.zone} (NH-44 Gachibowli Junction), Hyderabad"
+        await dispatch_police_notification(
+            db=self.db,
+            incident=incident,
+            location_label=location_label,
+            connection_manager=self.connection_manager,
         )
 
+        police_recipient = get_police_recipient()
+        police_body = build_police_notification_message(incident, location_label)
+        police_from = (
+            os.getenv("TWILIO_FROM_NUMBER")
+            or os.getenv("TWILIO_FROM")
+            or "+17372508034"
+        )
         sms_payload = {
-            "to": f"whatsapp:{police_to}",
-            "from": whatsapp_from,
+            "to": police_recipient,
+            "from": police_from,
             "body": police_body,
             "timestamp": now_iso,
         }
-
-        # 1. Real Twilio WhatsApp - Police Emergency Notification
-        twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-        twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-        police_action = f"POLICE_NOTIFICATION_SENT: {incident.id}-POLICE-DISPATCH"
-        try:
-            from twilio.rest import Client
-
-            client = Client(twilio_account_sid, twilio_auth_token)
-            msg = client.messages.create(
-                to=f"whatsapp:{police_to}", from_=whatsapp_from, body=police_body
-            )
-            police_action = f"POLICE_NOTIFICATION_SENT: {msg.sid}"
-            logger.info("Twilio Police dispatch WhatsApp sent: %s", msg.sid)
-        except Exception as e:
-            err_code = getattr(e, "code", None)
-            err_msg = getattr(e, "msg", str(e))
-            detail = f"Error {err_code}: {err_msg}" if err_code else str(e)
-            logger.warning("Twilio Police live notice (%s) - logging POLICE_NOTIFICATION_SENT to audit ledger", detail)
-
-        audit_entry_police = await self.db.append_audit_entry(
-            actor="police_dispatcher",
-            action=police_action,
-            timestamp=now_iso,
-        )
-        await self.connection_manager.broadcast_json(
-            {"type": "audit_entry", "entry": audit_entry_police.model_dump()}
-        )
-
-        # 2. Real Twilio WhatsApp - Hospital Preparation Notification
-        hospital_to = os.getenv("TWILIO_NEXT_OF_KIN_TO") or police_to
-        hospital_body = (
-            f"🏥 HOSPITAL TRAUMA ALERT: Incident {incident.id} incoming to Osmania General Hospital | "
-            f"Severity: {incident.corroborator_score:.2f} | Indicative ETA: ~6 min | "
-            f"Action: Please prepare Emergency Trauma Bay & surgical intake team."
-        )
-        hosp_action = f"HOSPITAL_NOTIFICATION_SENT: {incident.id}-OGH-TRAUMA-CAPACITY"
-        try:
-            from twilio.rest import Client
-
-            client = Client(twilio_account_sid, twilio_auth_token)
-            msg2 = client.messages.create(
-                to=f"whatsapp:{hospital_to}", from_=whatsapp_from, body=hospital_body
-            )
-            hosp_action = f"HOSPITAL_NOTIFICATION_SENT: {msg2.sid}"
-            logger.info("Twilio Hospital trauma alert sent: %s", msg2.sid)
-        except Exception as e:
-            err_code2 = getattr(e, "code", None)
-            err_msg2 = getattr(e, "msg", str(e))
-            detail2 = f"Error {err_code2}: {err_msg2}" if err_code2 else str(e)
-            logger.warning("Twilio Hospital live notice (%s) - logging HOSPITAL_NOTIFICATION_SENT to audit ledger", detail2)
-
-        audit_entry_hosp = await self.db.append_audit_entry(
-            actor="hospital_coordinator",
-            action=hosp_action,
-            timestamp=now_iso,
-        )
-        await self.connection_manager.broadcast_json(
-            {"type": "audit_entry", "entry": audit_entry_hosp.model_dump()}
-        )
 
         # Check if real responder mobile device is on duty
         if self.responder_device_enabled or self.device_connected():
@@ -724,6 +678,14 @@ class IncidentOrchestrator:
             self.active_plan = self.build_stage2_dispatch_plan(inc)
             logger.info("Stage 2 pickup-to-hospital route plan generated for %s (dest: %s, eta: %ds)",
                         inc.id, self.active_plan["hospital_id"], self.active_plan["eta_seconds"])
+            location_label = f"{inc.zone} (NH-44 Gachibowli Junction), Hyderabad"
+            await dispatch_hospital_notification(
+                db=self.db,
+                incident=inc,
+                plan=self.active_plan,
+                location_label=location_label,
+                connection_manager=self.connection_manager,
+            )
 
         await self.db.save_incident(inc)
         await self.connection_manager.broadcast_json(
@@ -809,6 +771,19 @@ class IncidentOrchestrator:
                 "approved_by": "Operator-1",
                 "field_updates": self.field_updates,
             }
+            notifs = await self.db.get_notifications_for_incident(inc.id)
+            mobile_inc["notifications"] = [
+                {
+                    "type": n.notification_type,
+                    "recipient": n.recipient,
+                    "channel": n.channel,
+                    "status": n.status,
+                    "trigger_event": n.trigger_event,
+                    "timestamp": n.timestamp,
+                    "provider_id": n.provider_id,
+                }
+                for n in notifs
+            ]
 
         summary_en = (
             f"Collision alert at {inc.zone if inc else 'Zone 04'}. Destination Osmania General Hospital. "

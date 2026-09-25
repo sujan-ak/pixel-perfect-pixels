@@ -99,6 +99,14 @@ def run_integration_test():
         assert s["incident"]["field_status"] == "ON_SCENE"
         print(f" Shared database field_status updated to ON_SCENE")
 
+        # 9b. Mobile reports PATIENT_LOADED (Triggers Stage 2 route + Hospital Notification)
+        print("\n[STEP 9b] Mobile reports status: PATIENT_LOADED...")
+        r = client.post("/api/field_status", json={"source": "responder_iphone", "status": "PATIENT_LOADED"})
+        assert r.status_code == 200, f"Field status PATIENT_LOADED failed: {r.text}"
+        s = r.json()
+        assert s["incident"]["field_status"] == "PATIENT_LOADED"
+        print(f" Shared database field_status updated to PATIENT_LOADED")
+
         # 10. Mobile reports HANDED_OVER
         print("\n[STEP 10] Mobile reports status: HANDED_OVER...")
         r = client.post("/api/field_status", json={"source": "responder_iphone", "status": "HANDED_OVER"})
@@ -121,6 +129,7 @@ def run_integration_test():
         has_ack = any("RESPONDER_ACKNOWLEDGED" in a for a in actions)
         has_en_route = any("RESPONDER_EN_ROUTE" in a for a in actions)
         has_on_scene = any("RESPONDER_ON_SCENE" in a for a in actions)
+        has_patient_loaded = any("RESPONDER_PATIENT_LOADED" in a for a in actions)
         has_handed_over = any("RESPONDER_HANDED_OVER" in a for a in actions)
 
         print(f" POLICE_NOTIFICATION_SENT recorded: {has_police}")
@@ -128,6 +137,7 @@ def run_integration_test():
         print(f" RESPONDER_ACKNOWLEDGED recorded: {has_ack}")
         print(f" RESPONDER_EN_ROUTE recorded: {has_en_route}")
         print(f" RESPONDER_ON_SCENE recorded: {has_on_scene}")
+        print(f" RESPONDER_PATIENT_LOADED recorded: {has_patient_loaded}")
         print(f" RESPONDER_HANDED_OVER recorded: {has_handed_over}")
 
         assert has_police, "Missing POLICE_NOTIFICATION_SENT in audit ledger!"
@@ -135,6 +145,7 @@ def run_integration_test():
         assert has_ack, "Missing RESPONDER_ACKNOWLEDGED in audit ledger!"
         assert has_en_route, "Missing RESPONDER_EN_ROUTE in audit ledger!"
         assert has_on_scene, "Missing RESPONDER_ON_SCENE in audit ledger!"
+        assert has_patient_loaded, "Missing RESPONDER_PATIENT_LOADED in audit ledger!"
         assert has_handed_over, "Missing RESPONDER_HANDED_OVER in audit ledger!"
 
         # 12. Verify Hash Chain

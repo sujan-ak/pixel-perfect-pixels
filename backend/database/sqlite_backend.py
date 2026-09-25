@@ -9,6 +9,7 @@ from .interface import (
     AuditEntry,
     ChainVerifyResponse,
     DatabaseBackend,
+    EmergencyNotification,
     Incident,
     compute_short_hash,
     GENESIS_HASH,
@@ -52,6 +53,29 @@ class SqliteBackend(DatabaseBackend):
                     timestamp TEXT NOT NULL,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS emergency_notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    incident_id TEXT NOT NULL,
+                    notification_type TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    trigger_event TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message_body TEXT NOT NULL,
+                    provider_id TEXT,
+                    error_message TEXT
+                );
+                """
+            )
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_emergency_notifications_incident
+                ON emergency_notifications(incident_id, notification_type);
                 """
             )
             await db.commit()
@@ -405,6 +429,74 @@ class SqliteBackend(DatabaseBackend):
                     )
                 )
             return history
+
+    async def record_notification(self, notif: EmergencyNotification) -> EmergencyNotification:
+        async with self._write_lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO emergency_notifications (
+                        incident_id, notification_type, recipient, channel, trigger_event,
+                        timestamp, status, message_body, provider_id, error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        notif.incident_id,
+                        notif.notification_type,
+                        notif.recipient,
+                        notif.channel,
+                        notif.trigger_event,
+                        notif.timestamp,
+                        notif.status,
+                        notif.message_body,
+                        notif.provider_id,
+                        notif.error_message,
+                    ),
+                )
+                await db.commit()
+                notif.id = cursor.lastrowid
+                return notif
+
+    async def get_notifications_for_incident(
+        self, incident_id: str, notification_type: Optional[str] = None
+    ) -> List[EmergencyNotification]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if notification_type:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM emergency_notifications
+                    WHERE incident_id = ? AND notification_type = ?
+                    ORDER BY id ASC
+                    """,
+                    (incident_id, notification_type),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM emergency_notifications
+                    WHERE incident_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (incident_id,),
+                )
+            rows = await cursor.fetchall()
+            return [
+                EmergencyNotification(
+                    id=row["id"],
+                    incident_id=row["incident_id"],
+                    notification_type=row["notification_type"],
+                    recipient=row["recipient"],
+                    channel=row["channel"],
+                    trigger_event=row["trigger_event"],
+                    timestamp=row["timestamp"],
+                    status=row["status"],
+                    message_body=row["message_body"],
+                    provider_id=row["provider_id"],
+                    error_message=row["error_message"],
+                )
+                for row in rows
+            ]
 
 
 AuditDatabase = SqliteBackend
