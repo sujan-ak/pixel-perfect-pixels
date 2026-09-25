@@ -157,8 +157,8 @@
   font-family: var(--font-sans-stack) !important;
 }
 
-.leaflet-tile {
-  filter: brightness(0.9) contrast(1.15);
+.leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.88) saturate(0.55);
 }
 
 .leaflet-control-zoom a {

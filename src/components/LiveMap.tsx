@@ -150,11 +150,8 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
         zoomControl: false,
       });
 
-      // CartoDB Dark All Tiles
-      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>',
-        subdomains: "abcd",
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
         maxZoom: 19,
       }).addTo(map);
 
@@ -629,7 +626,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
               </span>
             </div>
             <p className="font-sans text-label text-text-muted">
-              Centred at 17.3850° N, 78.4867° E · CartoDB Dark Tiles · 4 Camera Zones
+              Centred at 17.3850° N, 78.4867° E · OpenStreetMap Dark Tiles · 4 Camera Zones
             </p>
           </div>
         </div>
