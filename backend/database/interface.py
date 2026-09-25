@@ -31,6 +31,24 @@ class Incident(BaseModel):
     media_file: str
     timestamp: str
     degraded: Optional[bool] = False
+    field_status: Optional[str] = None
+    responder_id: Optional[str] = None
+    ack_channel: Optional[str] = None
+    ack_time: Optional[str] = None
+
+
+class EmergencyNotification(BaseModel):
+    id: Optional[int] = None
+    incident_id: str
+    notification_type: str  # 'POLICE' or 'HOSPITAL'
+    recipient: str
+    channel: str  # 'SMS' or 'WHATSAPP'
+    trigger_event: str  # 'OPERATOR_APPROVED' or 'PATIENT_LOADED'
+    timestamp: str
+    status: str  # 'SENT' or 'FAILED'
+    message_body: str
+    provider_id: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class ChainVerifyResponse(BaseModel):
@@ -87,6 +105,18 @@ class DatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    async def record_notification(self, notif: EmergencyNotification) -> EmergencyNotification:
+        """Record an emergency notification attempt."""
+        pass
+
+    @abstractmethod
+    async def get_notifications_for_incident(
+        self, incident_id: str, notification_type: Optional[str] = None
+    ) -> List[EmergencyNotification]:
+        """Fetch all emergency notification records for an incident."""
+        pass
+
+    @abstractmethod
     async def tamper_demo_row(self) -> Dict[str, Any]:
         """[DEMO ONLY] Simulate adversary tampering with an audit ledger row."""
         pass
@@ -95,3 +125,4 @@ class DatabaseBackend(ABC):
     async def restore_demo_row(self) -> Dict[str, Any]:
         """[DEMO ONLY] Revert tampered audit ledger row back to authentic state."""
         pass
+

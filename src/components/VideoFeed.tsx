@@ -25,6 +25,12 @@ function formatStateLabel(state: IncidentState): string {
       return "Coordination in progress";
     case "ACKNOWLEDGED":
       return "Acknowledged";
+    case "EN_ROUTE":
+      return "En route";
+    case "ON_SCENE":
+      return "On scene";
+    case "HANDED_OVER":
+      return "Handed over";
     case "CLOSED":
       return "Closed";
     case "REJECTED":
@@ -47,6 +53,10 @@ function getStateBadgeClass(state: IncidentState): string {
     case "REJECTED":
       return "border-signal-rejected text-signal-rejected bg-signal-rejected/10";
     case "ACKNOWLEDGED":
+    case "EN_ROUTE":
+    case "ON_SCENE":
+    case "HANDED_OVER":
+      return "border-emerald-500 text-emerald-400 bg-emerald-500/10";
     case "CLOSED":
       return "border-signal-closed text-text-muted bg-signal-closed/10";
     default:

@@ -9,6 +9,7 @@ from .interface import (
     AuditEntry,
     ChainVerifyResponse,
     DatabaseBackend,
+    EmergencyNotification,
     Incident,
     compute_short_hash,
     GENESIS_HASH,
@@ -54,6 +55,29 @@ class SqliteBackend(DatabaseBackend):
                 );
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS emergency_notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    incident_id TEXT NOT NULL,
+                    notification_type TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    trigger_event TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message_body TEXT NOT NULL,
+                    provider_id TEXT,
+                    error_message TEXT
+                );
+                """
+            )
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_emergency_notifications_incident
+                ON emergency_notifications(incident_id, notification_type);
+                """
+            )
             await db.commit()
             try:
                 await db.execute("ALTER TABLE incidents ADD COLUMN degraded INTEGER DEFAULT 0;")
@@ -65,6 +89,17 @@ class SqliteBackend(DatabaseBackend):
                 await db.commit()
             except Exception:
                 pass
+            for col in [
+                "field_status TEXT DEFAULT NULL",
+                "responder_id TEXT DEFAULT NULL",
+                "ack_channel TEXT DEFAULT NULL",
+                "ack_time TEXT DEFAULT NULL",
+            ]:
+                try:
+                    await db.execute(f"ALTER TABLE incidents ADD COLUMN {col};")
+                    await db.commit()
+                except Exception:
+                    pass
             logger.info("Initialized SQLite database tables at %s", self.db_path)
 
     async def append_audit_entry(
@@ -259,9 +294,10 @@ class SqliteBackend(DatabaseBackend):
                 """
                 INSERT INTO incidents (
                     id, state, zone, scenario, corroborator_score, skeptic_score,
-                    fused_score, confidence, reasoning, media_file, timestamp, degraded, updated_at
+                    fused_score, confidence, reasoning, media_file, timestamp, degraded,
+                    field_status, responder_id, ack_channel, ack_time, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
                     zone = excluded.zone,
@@ -274,6 +310,10 @@ class SqliteBackend(DatabaseBackend):
                     media_file = excluded.media_file,
                     timestamp = excluded.timestamp,
                     degraded = excluded.degraded,
+                    field_status = excluded.field_status,
+                    responder_id = excluded.responder_id,
+                    ack_channel = excluded.ack_channel,
+                    ack_time = excluded.ack_time,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
@@ -289,10 +329,14 @@ class SqliteBackend(DatabaseBackend):
                     incident.media_file,
                     incident.timestamp,
                     1 if incident.degraded else 0,
+                    incident.field_status,
+                    incident.responder_id,
+                    incident.ack_channel,
+                    incident.ack_time,
                 ),
             )
             await db.commit()
-            logger.info("Saved incident %s [state=%s]", incident.id, incident.state)
+            logger.info("Saved incident %s [state=%s, field_status=%s]", incident.id, incident.state, incident.field_status)
 
     async def get_latest_incident(self) -> Optional[Incident]:
         async with aiosqlite.connect(self.db_path) as db:
@@ -303,6 +347,7 @@ class SqliteBackend(DatabaseBackend):
             row = await cursor.fetchone()
             if not row:
                 return None
+            keys = row.keys()
             return Incident(
                 id=row["id"],
                 state=row["state"],
@@ -311,11 +356,15 @@ class SqliteBackend(DatabaseBackend):
                 corroborator_score=row["corroborator_score"],
                 skeptic_score=row["skeptic_score"],
                 fused_score=row["fused_score"],
-                confidence=float(row["confidence"]) if "confidence" in row.keys() and row["confidence"] is not None else 0.90,
+                confidence=float(row["confidence"]) if "confidence" in keys and row["confidence"] is not None else 0.90,
                 reasoning=row["reasoning"],
                 media_file=row["media_file"],
                 timestamp=row["timestamp"],
-                degraded=bool(row["degraded"]) if "degraded" in row.keys() and row["degraded"] is not None else False,
+                degraded=bool(row["degraded"]) if "degraded" in keys and row["degraded"] is not None else False,
+                field_status=row["field_status"] if "field_status" in keys else None,
+                responder_id=row["responder_id"] if "responder_id" in keys else None,
+                ack_channel=row["ack_channel"] if "ack_channel" in keys else None,
+                ack_time=row["ack_time"] if "ack_time" in keys else None,
             )
 
     async def get_incident_by_id(self, incident_id: str) -> Optional[Incident]:
@@ -325,6 +374,7 @@ class SqliteBackend(DatabaseBackend):
             row = await cursor.fetchone()
             if not row:
                 return None
+            keys = row.keys()
             return Incident(
                 id=row["id"],
                 state=row["state"],
@@ -333,11 +383,15 @@ class SqliteBackend(DatabaseBackend):
                 corroborator_score=row["corroborator_score"],
                 skeptic_score=row["skeptic_score"],
                 fused_score=row["fused_score"],
-                confidence=float(row["confidence"]) if "confidence" in row.keys() and row["confidence"] is not None else 0.90,
+                confidence=float(row["confidence"]) if "confidence" in keys and row["confidence"] is not None else 0.90,
                 reasoning=row["reasoning"],
                 media_file=row["media_file"],
                 timestamp=row["timestamp"],
-                degraded=bool(row["degraded"]) if "degraded" in row.keys() and row["degraded"] is not None else False,
+                degraded=bool(row["degraded"]) if "degraded" in keys and row["degraded"] is not None else False,
+                field_status=row["field_status"] if "field_status" in keys else None,
+                responder_id=row["responder_id"] if "responder_id" in keys else None,
+                ack_channel=row["ack_channel"] if "ack_channel" in keys else None,
+                ack_time=row["ack_time"] if "ack_time" in keys else None,
             )
 
     async def get_incident_history(self) -> List[Incident]:
@@ -351,20 +405,95 @@ class SqliteBackend(DatabaseBackend):
                 """
             )
             rows = await cursor.fetchall()
+            history = []
+            for row in rows:
+                keys = row.keys()
+                history.append(
+                    Incident(
+                        id=row["id"],
+                        state=row["state"],
+                        zone=row["zone"],
+                        scenario=row["scenario"],
+                        corroborator_score=row["corroborator_score"],
+                        skeptic_score=row["skeptic_score"],
+                        fused_score=row["fused_score"],
+                        confidence=float(row["confidence"]) if "confidence" in keys and row["confidence"] is not None else 0.90,
+                        reasoning=row["reasoning"],
+                        media_file=row["media_file"],
+                        timestamp=row["timestamp"],
+                        degraded=bool(row["degraded"]) if "degraded" in keys and row["degraded"] is not None else False,
+                        field_status=row["field_status"] if "field_status" in keys else None,
+                        responder_id=row["responder_id"] if "responder_id" in keys else None,
+                        ack_channel=row["ack_channel"] if "ack_channel" in keys else None,
+                        ack_time=row["ack_time"] if "ack_time" in keys else None,
+                    )
+                )
+            return history
+
+    async def record_notification(self, notif: EmergencyNotification) -> EmergencyNotification:
+        async with self._write_lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO emergency_notifications (
+                        incident_id, notification_type, recipient, channel, trigger_event,
+                        timestamp, status, message_body, provider_id, error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        notif.incident_id,
+                        notif.notification_type,
+                        notif.recipient,
+                        notif.channel,
+                        notif.trigger_event,
+                        notif.timestamp,
+                        notif.status,
+                        notif.message_body,
+                        notif.provider_id,
+                        notif.error_message,
+                    ),
+                )
+                await db.commit()
+                notif.id = cursor.lastrowid
+                return notif
+
+    async def get_notifications_for_incident(
+        self, incident_id: str, notification_type: Optional[str] = None
+    ) -> List[EmergencyNotification]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if notification_type:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM emergency_notifications
+                    WHERE incident_id = ? AND notification_type = ?
+                    ORDER BY id ASC
+                    """,
+                    (incident_id, notification_type),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM emergency_notifications
+                    WHERE incident_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (incident_id,),
+                )
+            rows = await cursor.fetchall()
             return [
-                Incident(
+                EmergencyNotification(
                     id=row["id"],
-                    state=row["state"],
-                    zone=row["zone"],
-                    scenario=row["scenario"],
-                    corroborator_score=row["corroborator_score"],
-                    skeptic_score=row["skeptic_score"],
-                    fused_score=row["fused_score"],
-                    confidence=float(row["confidence"]) if "confidence" in row.keys() and row["confidence"] is not None else 0.90,
-                    reasoning=row["reasoning"],
-                    media_file=row["media_file"],
+                    incident_id=row["incident_id"],
+                    notification_type=row["notification_type"],
+                    recipient=row["recipient"],
+                    channel=row["channel"],
+                    trigger_event=row["trigger_event"],
                     timestamp=row["timestamp"],
-                    degraded=bool(row["degraded"]) if "degraded" in row.keys() and row["degraded"] is not None else False,
+                    status=row["status"],
+                    message_body=row["message_body"],
+                    provider_id=row["provider_id"],
+                    error_message=row["error_message"],
                 )
                 for row in rows
             ]
