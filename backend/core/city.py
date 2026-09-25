@@ -251,11 +251,11 @@ class CityTwin:
             "ambulance_node": self.ambulance_node,
         }
 
-    def choose_hospital(self, severity: str, exclude: Optional[set] = None) -> str:
-        return choose_hospital(self, severity, exclude)
+    def choose_hospital(self, severity: str, exclude: Optional[set] = None, src_node: Optional[str] = None) -> str:
+        return choose_hospital(self, severity, exclude, src_node)
 
-    def plan_route(self, hospital_id: str, incident_node: str = "N_CAM4") -> Dict:
-        return plan_route(self, hospital_id, incident_node)
+    def plan_route(self, hospital_id: str, incident_node: str = "N_CAM4", src_node: Optional[str] = None) -> Dict:
+        return plan_route(self, hospital_id, incident_node, src_node)
 
 
 TWIN_SPEED_MPS = 8.0
@@ -265,33 +265,55 @@ class NoRouteAvailable(RuntimeError):
     pass
 
 
-def choose_hospital(twin: CityTwin, severity: str, exclude: Optional[set] = None) -> str:
+def choose_hospital(
+    twin: CityTwin,
+    severity: str,
+    exclude: Optional[set] = None,
+    src_node: Optional[str] = None,
+) -> str:
     """Trauma capability first for serious severities, then free bays, then proximity.
-    Matches original AuraShield hospital selection logic."""
+    When src_node is provided, candidates are ranked by shortest reachable graph cost from src_node."""
     exclude = exclude or set()
     options = [h for h in twin.hospitals.values() if h.hospital_id not in exclude and h.bays_free > 0]
     if not options:
-        options = list(twin.hospitals.values())
+        options = [h for h in twin.hospitals.values() if h.hospital_id not in exclude] or list(twin.hospitals.values())
     needs_trauma = severity in ("HIGH", "CRITICAL")
+
+    def path_distance(h_id: str) -> int:
+        if not src_node:
+            return 0
+        p = twin.shortest_path(src_node, h_id, avoid=twin.offline_junctions())
+        if p is not None:
+            return twin.path_cost(p)
+        p2 = twin.shortest_path(src_node, h_id)
+        return twin.path_cost(p2) if p2 is not None else 999999
+
     options.sort(key=lambda h: (
         0 if (h.trauma_capable and needs_trauma) else 1,
+        path_distance(h.hospital_id) if src_node else -h.bays_free,
         -h.bays_free,
         h.hospital_id,
     ))
     return options[0].hospital_id
 
 
-def plan_route(twin: CityTwin, hospital_id: str, incident_node: str = "N_CAM4") -> Dict:
-    """Computes shortest path from ambulance node to hospital over CityTwin graph."""
+def plan_route(
+    twin: CityTwin,
+    hospital_id: str,
+    incident_node: str = "N_CAM4",
+    src_node: Optional[str] = None,
+) -> Dict:
+    """Computes shortest path from src_node (defaults to ambulance_node) to hospital over CityTwin graph."""
+    origin = src_node or twin.ambulance_node
     avoid = twin.offline_junctions()
-    path = twin.shortest_path(twin.ambulance_node, hospital_id, avoid=avoid)
+    path = twin.shortest_path(origin, hospital_id, avoid=avoid)
     degraded = False
     if path is None:
-        path = twin.shortest_path(twin.ambulance_node, hospital_id)
+        path = twin.shortest_path(origin, hospital_id)
         degraded = True
         if path is None:
             # Fallback path if graph completely severed
-            path = [twin.ambulance_node, incident_node, hospital_id]
+            path = [origin, incident_node, hospital_id] if origin != incident_node else [origin, hospital_id]
 
     junctions = twin.junctions_on(path)
     controllable = [j for j in junctions if twin.junctions[j].controller_online]

@@ -29,7 +29,8 @@ LEGAL_TRANSITIONS: Dict[Optional[str], Set[str]] = {
     "REPLANNING": {"COORDINATION_IN_PROGRESS", "ACKNOWLEDGED"},
     "ACKNOWLEDGED": {"EN_ROUTE", "CLOSED"},
     "EN_ROUTE": {"ON_SCENE"},
-    "ON_SCENE": {"HANDED_OVER"},
+    "ON_SCENE": {"PATIENT_LOADED", "HANDED_OVER"},
+    "PATIENT_LOADED": {"HANDED_OVER"},
     "HANDED_OVER": {"CLOSED"},
     "CLOSED": set(),
     "REJECTED": set(),
@@ -141,12 +142,40 @@ class IncidentOrchestrator:
         return {
             "plan_id": f"plan_{incident.id}",
             "version": 1,
+            "stage": 1,
+            "stage_label": "DISPATCH_TO_SCENE",
             "hospital_id": hospital_id,
             "hospital_name": hospital.name if hospital else "Sunshine Hospital, Gachibowli",
             "severity": severity,
             "route_node_ids": route_data["path"],
             "junction_ids": route_data["controllable_junctions"],
             "eta_seconds": route_data["eta_seconds"],
+            "distance_meters": route_data["cost_m"],
+            "resources": ["Ambulance Unit #09", "Advanced Life Support"] if severity == "CRITICAL" else ["Basic Life Support"],
+            "superseded_by": None,
+            "superseded_reason": "",
+        }
+
+    def build_stage2_dispatch_plan(self, incident: Incident) -> dict:
+        severity = "CRITICAL" if incident.corroborator_score > 0.7 else "HIGH"
+        incident_node = "N_CAM4"
+        # Suitability first, then reachability and shortest graph path from N_CAM4
+        hospital_id = self.twin.choose_hospital(severity, src_node=incident_node)
+        hospital = self.twin.hospitals.get(hospital_id)
+        route_data = self.twin.plan_route(hospital_id, incident_node=incident_node, src_node=incident_node)
+
+        return {
+            "plan_id": f"plan_{incident.id}_s2",
+            "version": 2,
+            "stage": 2,
+            "stage_label": "PICKUP_TO_HOSPITAL",
+            "hospital_id": hospital_id,
+            "hospital_name": hospital.name if hospital else "Sunshine Hospital, Gachibowli",
+            "severity": severity,
+            "route_node_ids": route_data["path"],
+            "junction_ids": route_data["controllable_junctions"],
+            "eta_seconds": route_data["eta_seconds"],
+            "distance_meters": route_data["cost_m"],
             "resources": ["Ambulance Unit #09", "Advanced Life Support"] if severity == "CRITICAL" else ["Basic Life Support"],
             "superseded_by": None,
             "superseded_reason": "",
@@ -669,12 +698,17 @@ class IncidentOrchestrator:
     async def update_field_status(
         self, incident_id: Optional[str] = None, source: str = "responder_iphone", status: str = "EN_ROUTE"
     ) -> dict:
-        if status not in ("EN_ROUTE", "ON_SCENE", "HANDED_OVER"):
+        if status not in ("EN_ROUTE", "ON_SCENE", "PATIENT_LOADED", "HANDED_OVER"):
             raise ValueError(f"Unknown field status: {status}")
 
         inc = await self.db.get_incident_by_id(incident_id) if incident_id else await self.db.get_latest_incident()
         if not inc:
             raise KeyError("No active incident found to update field status")
+
+        # Idempotency guard: if status already applied, return state without duplicate actions/routes
+        if inc.field_status == status:
+            logger.info("Field status '%s' already set for %s (idempotent no-op)", status, inc.id)
+            return await self.build_mobile_state()
 
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         inc.field_status = status
@@ -684,6 +718,12 @@ class IncidentOrchestrator:
             "source": source,
             "at_ms": int(time.time() * 1000),
         })
+
+        # ONLY PATIENT_LOADED triggers Stage 2 routing (ON_SCENE does NOT trigger Stage 2)
+        if status == "PATIENT_LOADED":
+            self.active_plan = self.build_stage2_dispatch_plan(inc)
+            logger.info("Stage 2 pickup-to-hospital route plan generated for %s (dest: %s, eta: %ds)",
+                        inc.id, self.active_plan["hospital_id"], self.active_plan["eta_seconds"])
 
         await self.db.save_incident(inc)
         await self.connection_manager.broadcast_json(
@@ -697,9 +737,10 @@ class IncidentOrchestrator:
         await self.connection_manager.broadcast_json(
             {"type": "audit_entry", "entry": audit_entry.model_dump()}
         )
+        status_msg = "Patient loaded into ambulance — Stage 2 Hospital Green Wave activated" if status == "PATIENT_LOADED" else status.replace('_', ' ').title()
         await self.stream_agent_reasoning(
             "DISPATCH",
-            f"Mobile responder telemetry: Ambulance Unit status -> {status.replace('_', ' ').title()}"
+            f"Mobile responder telemetry: Ambulance Unit status -> {status_msg}"
         )
         return await self.build_mobile_state()
 
@@ -728,8 +769,14 @@ class IncidentOrchestrator:
         if inc:
             plan = self.active_plan or self.build_dispatch_plan(inc)
             mob_state = inc.state
-            if inc.state in ("EN_ROUTE", "ON_SCENE", "HANDED_OVER"):
+            if inc.state in ("EN_ROUTE", "ON_SCENE", "PATIENT_LOADED", "HANDED_OVER"):
                 mob_state = "ACKNOWLEDGED"
+
+            # Derive authoritative incident coordinates from CityTwin node N_CAM4
+            nodes_list = self.twin.snapshot()["nodes"]
+            cam_node = next((n for n in nodes_list if n["id"] == "N_CAM4"), None)
+            inc_lat = cam_node["lat"] if cam_node else 17.4400
+            inc_lon = cam_node["lon"] if cam_node else 78.3480
 
             mobile_inc = {
                 "incident_id": inc.id,
@@ -737,9 +784,9 @@ class IncidentOrchestrator:
                 "state": mob_state,
                 "field_status": inc.field_status,
                 "responder_id": inc.responder_id,
-                "location_label": f"{inc.zone} (MJ Market / NH-44), Hyderabad",
-                "lat": 17.3850,
-                "lon": 78.4867,
+                "location_label": f"{inc.zone} (NH-44 Gachibowli Junction), Hyderabad",
+                "lat": inc_lat,
+                "lon": inc_lon,
                 "camera_id": "CAM-HYD-04",
                 "confidence": inc.confidence if inc.confidence is not None else 0.90,
                 "verdict": "VERIFIED" if inc.state not in ("REJECTED", "OBSERVED", "CANDIDATE") else inc.state,

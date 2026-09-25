@@ -304,7 +304,7 @@ class DeclineReq(BaseModel):
 
 class FieldStatusReq(BaseModel):
     source: str = "responder_iphone"
-    status: str = Field(..., pattern="^(EN_ROUTE|ON_SCENE|HANDED_OVER)$")
+    status: str = Field(..., pattern="^(EN_ROUTE|ON_SCENE|PATIENT_LOADED|HANDED_OVER)$")
 
 
 class TimeoutReq(BaseModel):
@@ -342,7 +342,7 @@ async def responder_decline(req: DeclineReq) -> dict:
     return await orchestrator.decline_dispatch(source=req.source)
 
 
-@app.post("/api/field_status", summary="[AuraShield] Advance trip status: EN_ROUTE -> ON_SCENE -> HANDED_OVER")
+@app.post("/api/field_status", summary="[AuraShield] Advance trip status: EN_ROUTE -> ON_SCENE -> PATIENT_LOADED -> HANDED_OVER")
 async def responder_field_status(req: FieldStatusReq) -> dict:
     orchestrator.device_heartbeat()
     return await orchestrator.update_field_status(source=req.source, status=req.status)
