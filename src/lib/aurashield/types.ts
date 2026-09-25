@@ -23,6 +23,7 @@ export interface Incident {
   reasoning: string;
   media_file: string;
   timestamp: string;
+  degraded?: boolean;
 }
 
 export interface AuditEntry {

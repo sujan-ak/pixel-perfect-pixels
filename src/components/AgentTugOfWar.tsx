@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { ShieldAlert, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ShieldAlert, ShieldCheck } from "lucide-react";
 import type { Incident } from "@/lib/aurashield/types";
 
 const FUSED_THRESHOLD = 0.35;
@@ -23,15 +23,23 @@ export function AgentTugOfWar({ incident }: { incident: Incident | null }) {
           <span className="font-sans text-panel-header text-text-primary">Agent adjudication</span>
           <span className="font-sans text-label text-text-muted">/ dual-model fusion</span>
         </div>
-        <span
-          className={`rounded border px-2 py-0.5 font-sans text-label font-medium ${
-            thresholdMet
-              ? "border-signal-verified text-signal-verified bg-signal-verified/10"
-              : "border-line text-text-muted bg-bg-panel-raised"
-          }`}
-        >
-          {thresholdMet ? "Threshold met" : "Below threshold"}
-        </span>
+        <div className="flex items-center gap-2">
+          {incident?.degraded && (
+            <span className="flex items-center gap-1 rounded border border-signal-pending/60 bg-signal-pending/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-signal-pending animate-pulse">
+              <AlertTriangle className="h-3 w-3" />
+              <span>AGENT DEGRADED · HEURISTIC FALLBACK</span>
+            </span>
+          )}
+          <span
+            className={`rounded border px-2 py-0.5 font-sans text-label font-medium ${
+              thresholdMet
+                ? "border-signal-verified text-signal-verified bg-signal-verified/10"
+                : "border-line text-text-muted bg-bg-panel-raised"
+            }`}
+          >
+            {thresholdMet ? "Threshold met" : "Below threshold"}
+          </span>
+        </div>
       </div>
 
       {/* Hero Score Display (32px IBM Plex Mono, cyan reserved for live WS data) */}

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -6,6 +6,7 @@ import {
   CheckCircle,
   Clock,
   MessageSquare,
+  Play,
   Power,
   RotateCcw,
   Shield,
@@ -49,7 +50,46 @@ export function ControlRoom() {
   } = useAuraShield();
 
   const [utcTime, setUtcTime] = useState("");
+  const [runningBoth, setRunningBoth] = useState(false);
+  const incidentRef = useRef(incident);
   const awaitingClearance = incident?.state === "RESPONSE_PROPOSED";
+
+  useEffect(() => {
+    incidentRef.current = incident;
+  }, [incident]);
+
+  const handleRunBoth = async () => {
+    if (busy || runningBoth) return;
+    setRunningBoth(true);
+    try {
+      await triggerScenario("crash_zone04");
+
+      // Poll until incident reaches RESPONSE_PROPOSED, REJECTED, or CLOSED
+      const start = Date.now();
+      await new Promise((r) => setTimeout(r, 800));
+
+      while (Date.now() - start < 35000) {
+        const curr = incidentRef.current;
+        if (
+          curr &&
+          (curr.state === "RESPONSE_PROPOSED" ||
+            curr.state === "REJECTED" ||
+            curr.state === "CLOSED")
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
+      // Wait 3 seconds per specification
+      await new Promise((r) => setTimeout(r, 3000));
+
+      // Trigger false alarm scenario
+      await triggerScenario("false_alarm");
+    } finally {
+      setRunningBoth(false);
+    }
+  };
 
   useEffect(() => {
     const updateTime = () => {
@@ -151,7 +191,7 @@ export function ControlRoom() {
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-sans text-label text-text-muted mr-1">Trigger scenarios:</span>
             <button
-              disabled={busy}
+              disabled={busy || runningBoth}
               onClick={() => triggerScenario("crash_zone04")}
               className="flex items-center gap-2 rounded border border-signal-verified/40 bg-signal-verified/10 px-3 py-1.5 font-sans text-label font-medium text-signal-verified transition-colors hover:bg-signal-verified/20 disabled:opacity-40 focus-visible:ring-1 focus-visible:ring-signal-data"
             >
@@ -160,18 +200,32 @@ export function ControlRoom() {
             </button>
 
             <button
-              disabled={busy}
+              disabled={busy || runningBoth}
               onClick={() => triggerScenario("false_alarm")}
               className="flex items-center gap-2 rounded border border-signal-pending/40 bg-signal-pending/10 px-3 py-1.5 font-sans text-label font-medium text-signal-pending transition-colors hover:bg-signal-pending/20 disabled:opacity-40 focus-visible:ring-1 focus-visible:ring-signal-data"
             >
               <AlertTriangle className="h-4 w-4" />
               <span>Trigger false alarm scenario</span>
             </button>
+
+            <button
+              disabled={busy || runningBoth}
+              onClick={handleRunBoth}
+              className={`flex items-center gap-2 rounded border px-3 py-1.5 font-sans text-label font-medium transition-colors focus-visible:ring-1 focus-visible:ring-signal-data disabled:opacity-40 ${
+                runningBoth
+                  ? "border-signal-data bg-signal-data/20 text-signal-data animate-pulse"
+                  : "border-signal-data/50 bg-signal-data/10 text-signal-data hover:bg-signal-data/20"
+              }`}
+            >
+              <Play className="h-4 w-4" />
+              <span>{runningBoth ? "Running batch sequence..." : "RUN BOTH SCENARIOS"}</span>
+            </button>
           </div>
 
           <button
             onClick={reset}
-            className="flex items-center gap-1.5 rounded border border-line bg-bg-panel-raised px-3 py-1.5 font-sans text-label text-text-muted transition-colors hover:border-text-primary hover:text-text-primary focus-visible:ring-1 focus-visible:ring-signal-data"
+            disabled={runningBoth}
+            className="flex items-center gap-1.5 rounded border border-line bg-bg-panel-raised px-3 py-1.5 font-sans text-label text-text-muted transition-colors hover:border-text-primary hover:text-text-primary disabled:opacity-40 focus-visible:ring-1 focus-visible:ring-signal-data"
           >
             <RotateCcw className="h-3.5 w-3.5" />
             <span>Reset console</span>

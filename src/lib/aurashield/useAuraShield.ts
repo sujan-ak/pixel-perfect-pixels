@@ -107,7 +107,13 @@ export function useAuraShield() {
           | { type: "audit_sync"; entries: AuditEntry[] }
           | { type: "governor_sensitivity"; sensitivity: number }
           | { type: "automation_pause_status"; paused: boolean };
-        if (msg.type === "incident_update") setIncident(msg.incident);
+        if (msg.type === "incident_update") {
+          const inc = {
+            ...msg.incident,
+            degraded: (msg as any).degraded ?? msg.incident.degraded ?? false,
+          };
+          setIncident(inc);
+        }
         if (msg.type === "audit_entry")
           setAudit((prev) => (prev.some((e) => e.id === msg.entry.id) ? prev : [...prev, msg.entry]));
         if (msg.type === "audit_sync") setAudit(msg.entries);
