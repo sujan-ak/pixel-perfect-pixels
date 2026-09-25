@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import L from "leaflet";
+import type * as LeafletType from "leaflet";
 import {
   Activity,
   Ambulance,
@@ -90,16 +90,18 @@ interface LiveMapProps {
 }
 
 export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps) {
+  const [mounted, setMounted] = useState(false);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
-  const mapInstanceRef = useRef<L.Map | null>(null);
+  const mapInstanceRef = useRef<LeafletType.Map | null>(null);
+  const leafletRef = useRef<typeof LeafletType | null>(null);
 
   // Layer references
-  const zoneMarkersRef = useRef<Map<string, L.Marker>>(new Map());
-  const signalMarkersRef = useRef<Map<string, L.Marker>>(new Map());
-  const inactivePolylineRef = useRef<L.Polyline | null>(null);
-  const activeGlowPolylineRef = useRef<L.Polyline | null>(null);
-  const activeCorePolylineRef = useRef<L.Polyline | null>(null);
-  const ambulanceMarkerRef = useRef<L.Marker | null>(null);
+  const zoneMarkersRef = useRef<Map<string, LeafletType.Marker>>(new Map());
+  const signalMarkersRef = useRef<Map<string, LeafletType.Marker>>(new Map());
+  const inactivePolylineRef = useRef<LeafletType.Polyline | null>(null);
+  const activeGlowPolylineRef = useRef<LeafletType.Polyline | null>(null);
+  const activeCorePolylineRef = useRef<LeafletType.Polyline | null>(null);
+  const ambulanceMarkerRef = useRef<LeafletType.Marker | null>(null);
   const animationFrameRef = useRef<number | null>(null);
 
   // Component state
@@ -116,6 +118,11 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
   const [ambulanceProgress, setAmbulanceProgress] = useState(0); // 0 to 1
   const actuationTriggeredRef = useRef(false);
 
+  // SSR Mount Gate
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   // Detect whether approval is active
   const approved = Boolean(
     isApproved ||
@@ -125,167 +132,179 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
         )),
   );
 
-  // Initialize Leaflet Map
+  // Initialize Leaflet Map safely in browser environment
   useEffect(() => {
-    if (!mapContainerRef.current || mapInstanceRef.current) return;
+    if (!mounted || !mapContainerRef.current || mapInstanceRef.current) return;
+    let isCancelled = false;
 
-    const map = L.map(mapContainerRef.current, {
-      center: HYD_CENTER,
-      zoom: 14,
-      minZoom: 13,
-      maxZoom: 18,
-      zoomControl: false,
-    });
+    import("leaflet").then((leafletModule) => {
+      if (isCancelled || !mapContainerRef.current || mapInstanceRef.current) return;
+      const L = (leafletModule.default ?? leafletModule) as typeof LeafletType;
+      leafletRef.current = L;
 
-    // CartoDB Dark All Tiles
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>',
-      subdomains: "abcd",
-      maxZoom: 19,
-    }).addTo(map);
+      const map = L.map(mapContainerRef.current, {
+        center: HYD_CENTER,
+        zoom: 14,
+        minZoom: 13,
+        maxZoom: 18,
+        zoomControl: false,
+      });
 
-    L.control.zoom({ position: "topright" }).addTo(map);
+      // CartoDB Dark All Tiles
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>',
+        subdomains: "abcd",
+        maxZoom: 19,
+      }).addTo(map);
 
-    // 1. Inactive route dashed polyline
-    const inactiveLine = L.polyline(CORRIDOR_ROUTE, {
-      color: "#475569",
-      weight: 3,
-      dashArray: "6, 8",
-      opacity: 0.6,
-    }).addTo(map);
-    inactivePolylineRef.current = inactiveLine;
+      L.control.zoom({ position: "topright" }).addTo(map);
 
-    // 2. Camera Zone Markers (Zone 01 - Zone 04)
-    CAMERA_ZONES.forEach((zone) => {
-      const isZone4 = zone.id === "Zone 04";
-      const iconHtml = `
-        <div class="relative flex items-center justify-center">
-          ${
-            isZone4
-              ? `<div class="absolute -inset-2 rounded-full border border-signal-rejected/80 marker-pulse-red pointer-events-none"></div>`
-              : ""
-          }
-          <div class="flex items-center gap-1 px-2 py-1 rounded bg-bg-panel border ${
-            isZone4
-              ? "border-signal-rejected text-signal-rejected shadow-[0_0_12px_rgba(255,92,92,0.4)]"
-              : "border-line text-text-muted"
-          } font-mono text-[10px] font-semibold tracking-wider whitespace-nowrap">
-            <span class="inline-block w-2 h-2 rounded-full ${
-              isZone4 ? "bg-signal-rejected animate-ping" : "bg-text-muted"
-            }"></span>
-            <span>${zone.id}</span>
+      // 1. Inactive route dashed polyline
+      const inactiveLine = L.polyline(CORRIDOR_ROUTE, {
+        color: "#475569",
+        weight: 3,
+        dashArray: "6, 8",
+        opacity: 0.6,
+      }).addTo(map);
+      inactivePolylineRef.current = inactiveLine;
+
+      // 2. Camera Zone Markers (Zone 01 - Zone 04)
+      CAMERA_ZONES.forEach((zone) => {
+        const isZone4 = zone.id === "Zone 04";
+        const iconHtml = `
+          <div class="relative flex items-center justify-center">
+            ${
+              isZone4
+                ? `<div class="absolute -inset-2 rounded-full border border-signal-rejected/80 marker-pulse-red pointer-events-none"></div>`
+                : ""
+            }
+            <div class="flex items-center gap-1 px-2 py-1 rounded bg-bg-panel border ${
+              isZone4
+                ? "border-signal-rejected text-signal-rejected shadow-[0_0_12px_rgba(255,92,92,0.4)]"
+                : "border-line text-text-muted"
+            } font-mono text-[10px] font-semibold tracking-wider whitespace-nowrap">
+              <span class="inline-block w-2 h-2 rounded-full ${
+                isZone4 ? "bg-signal-rejected animate-ping" : "bg-text-muted"
+              }"></span>
+              <span>${zone.id}</span>
+            </div>
           </div>
+        `;
+
+        const marker = L.marker(zone.pos, {
+          icon: L.divIcon({
+            className: "custom-zone-marker",
+            html: iconHtml,
+            iconSize: [80, 26],
+            iconAnchor: [40, 13],
+          }),
+        }).addTo(map);
+
+        marker.bindPopup(`
+          <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
+            <div class="font-bold text-signal-data">${zone.id} · ${zone.name}</div>
+            <div class="text-text-muted mt-1">${zone.description}</div>
+            <div class="font-mono text-[10px] text-text-muted mt-1">${zone.pos[0].toFixed(4)}°N, ${zone.pos[1].toFixed(4)}°E</div>
+          </div>
+        `);
+
+        zoneMarkersRef.current.set(zone.id, marker);
+      });
+
+      // 3. Hospital Marker
+      const hospitalHtml = `
+        <div class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#0f2438] border border-[#22d3ee] text-[#22d3ee] font-mono text-[11px] font-bold shadow-[0_0_14px_rgba(34,211,238,0.35)] whitespace-nowrap">
+          <span class="flex items-center justify-center w-3.5 h-3.5 rounded-full bg-[#22d3ee] text-[#0a0e14] font-black text-[10px]">+</span>
+          <span>${HOSPITAL.name}</span>
         </div>
       `;
-
-      const marker = L.marker(zone.pos, {
+      L.marker(HOSPITAL.pos, {
         icon: L.divIcon({
-          className: "custom-zone-marker",
-          html: iconHtml,
-          iconSize: [80, 26],
-          iconAnchor: [40, 13],
+          className: "custom-hospital-marker",
+          html: hospitalHtml,
+          iconSize: [180, 26],
+          iconAnchor: [90, 13],
         }),
-      }).addTo(map);
+      })
+        .addTo(map)
+        .bindPopup(`
+          <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
+            <div class="font-bold text-[#22d3ee]">${HOSPITAL.name}</div>
+            <div class="text-text-muted mt-1">${HOSPITAL.type}</div>
+            <div class="text-signal-verified font-medium mt-1">Designated Emergency Receiver</div>
+          </div>
+        `);
 
-      marker.bindPopup(`
-        <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
-          <div class="font-bold text-signal-data">${zone.id} · ${zone.name}</div>
-          <div class="text-text-muted mt-1">${zone.description}</div>
-          <div class="font-mono text-[10px] text-text-muted mt-1">${zone.pos[0].toFixed(4)}°N, ${zone.pos[1].toFixed(4)}°E</div>
-        </div>
-      `);
-
-      zoneMarkersRef.current.set(zone.id, marker);
-    });
-
-    // 3. Hospital Marker
-    const hospitalHtml = `
-      <div class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#0f2438] border border-[#22d3ee] text-[#22d3ee] font-mono text-[11px] font-bold shadow-[0_0_14px_rgba(34,211,238,0.35)] whitespace-nowrap">
-        <span class="flex items-center justify-center w-3.5 h-3.5 rounded-full bg-[#22d3ee] text-[#0a0e14] font-black text-[10px]">+</span>
-        <span>${HOSPITAL.name}</span>
-      </div>
-    `;
-    L.marker(HOSPITAL.pos, {
-      icon: L.divIcon({
-        className: "custom-hospital-marker",
-        html: hospitalHtml,
-        iconSize: [180, 26],
-        iconAnchor: [90, 13],
-      }),
-    })
-      .addTo(map)
-      .bindPopup(`
-        <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
-          <div class="font-bold text-[#22d3ee]">${HOSPITAL.name}</div>
-          <div class="text-text-muted mt-1">${HOSPITAL.type}</div>
-          <div class="text-signal-verified font-medium mt-1">Designated Emergency Receiver</div>
-        </div>
-      `);
-
-    // 4. Fire Station Marker
-    const fireHtml = `
-      <div class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#2b1810] border border-[#f5a623] text-[#f5a623] font-mono text-[11px] font-bold shadow-[0_0_12px_rgba(245,166,35,0.3)] whitespace-nowrap">
-        <span class="text-xs">🔥</span>
-        <span>${FIRE_STATION.name}</span>
-      </div>
-    `;
-    L.marker(FIRE_STATION.pos, {
-      icon: L.divIcon({
-        className: "custom-fire-marker",
-        html: fireHtml,
-        iconSize: [170, 26],
-        iconAnchor: [85, 13],
-      }),
-    })
-      .addTo(map)
-      .bindPopup(`
-        <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
-          <div class="font-bold text-[#f5a623]">${FIRE_STATION.name}</div>
-          <div class="text-text-muted mt-1">${FIRE_STATION.type}</div>
-          <div class="text-text-muted mt-1">Heavy Rescue & Hazmat Standby</div>
-        </div>
-      `);
-
-    // 5. Six Traffic Signals (Red Circles by Default)
-    TRAFFIC_SIGNALS.forEach((sig) => {
-      const signalHtml = `
-        <div id="sig-icon-${sig.id}" class="relative flex items-center justify-center w-6 h-6 rounded-full bg-bg-void border-2 border-signal-rejected signal-glow-red transition-all duration-300">
-          <span class="w-2.5 h-2.5 rounded-full bg-signal-rejected"></span>
+      // 4. Fire Station Marker
+      const fireHtml = `
+        <div class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#2b1810] border border-[#f5a623] text-[#f5a623] font-mono text-[11px] font-bold shadow-[0_0_12px_rgba(245,166,35,0.3)] whitespace-nowrap">
+          <span class="text-xs">🔥</span>
+          <span>${FIRE_STATION.name}</span>
         </div>
       `;
-
-      const marker = L.marker(sig.pos, {
+      L.marker(FIRE_STATION.pos, {
         icon: L.divIcon({
-          className: "custom-signal-marker",
-          html: signalHtml,
-          iconSize: [24, 24],
-          iconAnchor: [12, 12],
+          className: "custom-fire-marker",
+          html: fireHtml,
+          iconSize: [170, 26],
+          iconAnchor: [85, 13],
         }),
-      }).addTo(map);
+      })
+        .addTo(map)
+        .bindPopup(`
+          <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
+            <div class="font-bold text-[#f5a623]">${FIRE_STATION.name}</div>
+            <div class="text-text-muted mt-1">${FIRE_STATION.type}</div>
+            <div class="text-text-muted mt-1">Heavy Rescue & Hazmat Standby</div>
+          </div>
+        `);
 
-      marker.bindPopup(`
-        <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
-          <div class="font-bold text-text-primary">${sig.id} · ${sig.name}</div>
-          <div class="text-text-muted mt-0.5">Municipal Signal #${sig.junctionNumber}</div>
-          <div class="mt-1 font-mono text-[10px] text-signal-rejected">Status: HOLD RED (Standard Cycle)</div>
-        </div>
-      `);
+      // 5. Six Traffic Signals (Red Circles by Default)
+      TRAFFIC_SIGNALS.forEach((sig) => {
+        const signalHtml = `
+          <div id="sig-icon-${sig.id}" class="relative flex items-center justify-center w-6 h-6 rounded-full bg-bg-void border-2 border-signal-rejected signal-glow-red transition-all duration-300">
+            <span class="w-2.5 h-2.5 rounded-full bg-signal-rejected"></span>
+          </div>
+        `;
 
-      signalMarkersRef.current.set(sig.id, marker);
+        const marker = L.marker(sig.pos, {
+          icon: L.divIcon({
+            className: "custom-signal-marker",
+            html: signalHtml,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
+          }),
+        }).addTo(map);
+
+        marker.bindPopup(`
+          <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
+            <div class="font-bold text-text-primary">${sig.id} · ${sig.name}</div>
+            <div class="text-text-muted mt-0.5">Municipal Signal #${sig.junctionNumber}</div>
+            <div class="mt-1 font-mono text-[10px] text-signal-rejected">Status: HOLD RED (Standard Cycle)</div>
+          </div>
+        `);
+
+        signalMarkersRef.current.set(sig.id, marker);
+      });
+
+      mapInstanceRef.current = map;
     });
-
-    mapInstanceRef.current = map;
 
     return () => {
+      isCancelled = true;
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      map.remove();
-      mapInstanceRef.current = null;
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
     };
-  }, []);
+  }, [mounted]);
 
   // Update active zone pulsing based on current incident
   useEffect(() => {
+    const L = leafletRef.current;
+    if (!L) return;
     const activeZone = incident?.zone ?? "Zone 04";
     CAMERA_ZONES.forEach((zone) => {
       const marker = zoneMarkersRef.current.get(zone.id);
@@ -325,10 +344,10 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
 
   // Actuate green corridor upon operator approval (sequential 200ms transitions)
   useEffect(() => {
-    if (!approved || actuationTriggeredRef.current || !mapInstanceRef.current) return;
-    actuationTriggeredRef.current = true;
-
+    const L = leafletRef.current;
     const map = mapInstanceRef.current;
+    if (!approved || actuationTriggeredRef.current || !map || !L) return;
+    actuationTriggeredRef.current = true;
 
     // Remove inactive line
     if (inactivePolylineRef.current) {
@@ -362,7 +381,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
 
         // 2. Update Leaflet marker DOM to vibrant green
         const marker = signalMarkersRef.current.get(sig.id);
-        if (marker) {
+        if (marker && L) {
           const greenHtml = `
             <div id="sig-icon-${sig.id}" class="relative flex items-center justify-center w-6 h-6 rounded-full bg-[#0a2318] border-2 border-signal-verified signal-glow-green transition-all duration-300">
               <span class="w-2.5 h-2.5 rounded-full bg-signal-verified animate-ping"></span>
@@ -439,15 +458,15 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
         }
 
         // When the final signal turns green, launch ambulance animation along the route
-        if (index === TRAFFIC_SIGNALS.length - 1) {
-          launchAmbulance(map);
+        if (index === TRAFFIC_SIGNALS.length - 1 && L) {
+          launchAmbulance(map, L);
         }
       }, index * 200); // Exactly 200ms apart per PDF specification!
     });
   }, [approved, onSignalActuated]);
 
   // Interpolate ambulance along polyline coordinates
-  const launchAmbulance = useCallback((map: L.Map) => {
+  const launchAmbulance = useCallback((map: LeafletType.Map, L: typeof LeafletType) => {
     const ambulanceHtml = `
       <div class="relative flex items-center justify-center p-1.5 rounded-full bg-bg-panel border border-[#22d3ee] ambulance-siren shadow-[0_0_16px_rgba(34,211,238,0.7)]">
         <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-signal-verified" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -531,6 +550,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
 
   // Reset corridor state if incident resets
   useEffect(() => {
+    const L = leafletRef.current;
     if (!incident) {
       actuationTriggeredRef.current = false;
       setCorridorActive(false);
@@ -546,7 +566,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
       });
 
       const map = mapInstanceRef.current;
-      if (map) {
+      if (map && L) {
         if (activeGlowPolylineRef.current) {
           map.removeLayer(activeGlowPolylineRef.current);
           activeGlowPolylineRef.current = null;
