@@ -133,16 +133,21 @@ class IncidentOrchestrator:
         return await self.build_mobile_state()
 
     def build_dispatch_plan(self, incident: Incident) -> dict:
+        severity = "CRITICAL" if incident.corroborator_score > 0.7 else "HIGH"
+        hospital_id = self.twin.choose_hospital(severity)
+        hospital = self.twin.hospitals.get(hospital_id)
+        route_data = self.twin.plan_route(hospital_id, incident_node="N_CAM4")
+
         return {
             "plan_id": f"plan_{incident.id}",
             "version": 1,
-            "hospital_id": "H_ALPHA",
-            "hospital_name": "Osmania General Hospital (Trauma Care)",
-            "severity": "CRITICAL" if incident.corroborator_score > 0.7 else "HIGH",
-            "route_node_ids": ["D_AMB", "N_CAM4", "J1", "J2", "J3", "J4", "H_ALPHA"],
-            "junction_ids": ["J1", "J2", "J3", "J4"],
-            "eta_seconds": 360,
-            "resources": ["Ambulance Unit #09", "Advanced Life Support"],
+            "hospital_id": hospital_id,
+            "hospital_name": hospital.name if hospital else "Sunshine Hospital, Gachibowli",
+            "severity": severity,
+            "route_node_ids": route_data["path"],
+            "junction_ids": route_data["controllable_junctions"],
+            "eta_seconds": route_data["eta_seconds"],
+            "resources": ["Ambulance Unit #09", "Advanced Life Support"] if severity == "CRITICAL" else ["Basic Life Support"],
             "superseded_by": None,
             "superseded_reason": "",
         }

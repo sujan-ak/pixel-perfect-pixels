@@ -250,3 +250,58 @@ class CityTwin:
             ],
             "ambulance_node": self.ambulance_node,
         }
+
+    def choose_hospital(self, severity: str, exclude: Optional[set] = None) -> str:
+        return choose_hospital(self, severity, exclude)
+
+    def plan_route(self, hospital_id: str, incident_node: str = "N_CAM4") -> Dict:
+        return plan_route(self, hospital_id, incident_node)
+
+
+TWIN_SPEED_MPS = 8.0
+
+
+class NoRouteAvailable(RuntimeError):
+    pass
+
+
+def choose_hospital(twin: CityTwin, severity: str, exclude: Optional[set] = None) -> str:
+    """Trauma capability first for serious severities, then free bays, then proximity.
+    Matches original AuraShield hospital selection logic."""
+    exclude = exclude or set()
+    options = [h for h in twin.hospitals.values() if h.hospital_id not in exclude and h.bays_free > 0]
+    if not options:
+        options = list(twin.hospitals.values())
+    needs_trauma = severity in ("HIGH", "CRITICAL")
+    options.sort(key=lambda h: (
+        0 if (h.trauma_capable and needs_trauma) else 1,
+        -h.bays_free,
+        h.hospital_id,
+    ))
+    return options[0].hospital_id
+
+
+def plan_route(twin: CityTwin, hospital_id: str, incident_node: str = "N_CAM4") -> Dict:
+    """Computes shortest path from ambulance node to hospital over CityTwin graph."""
+    avoid = twin.offline_junctions()
+    path = twin.shortest_path(twin.ambulance_node, hospital_id, avoid=avoid)
+    degraded = False
+    if path is None:
+        path = twin.shortest_path(twin.ambulance_node, hospital_id)
+        degraded = True
+        if path is None:
+            # Fallback path if graph completely severed
+            path = [twin.ambulance_node, incident_node, hospital_id]
+
+    junctions = twin.junctions_on(path)
+    controllable = [j for j in junctions if twin.junctions[j].controller_online]
+    cost = twin.path_cost(path)
+    return {
+        "path": path,
+        "junctions": junctions,
+        "controllable_junctions": controllable,
+        "avoided": sorted(avoid),
+        "degraded": degraded,
+        "cost_m": cost,
+        "eta_seconds": int(round(cost / TWIN_SPEED_MPS)),
+    }
