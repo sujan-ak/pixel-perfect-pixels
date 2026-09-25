@@ -245,7 +245,7 @@ export function ControlRoom() {
               <AgentTugOfWar incident={incident} />
             </div>
             <div>
-              <StateTracker state={incident?.state ?? null} />
+              <StateTracker state={incident?.state ?? null} incident={incident} />
             </div>
           </div>
         </div>

@@ -12,6 +12,12 @@ function formatStateLabel(state: IncidentState): string {
       return "Rejected";
     case "ACKNOWLEDGED":
       return "Acknowledged";
+    case "EN_ROUTE":
+      return "En route";
+    case "ON_SCENE":
+      return "On scene";
+    case "HANDED_OVER":
+      return "Handed over";
     default:
       return state;
   }

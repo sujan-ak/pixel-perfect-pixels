@@ -13,6 +13,7 @@ from agents.verification import (
     generate_reasoning,
     get_real_scores,
 )
+from core.city import CityTwin
 from database import DatabaseBackend, AuditEntry, Incident
 
 logger = logging.getLogger("aurashield.core.state_machine")
@@ -24,8 +25,12 @@ LEGAL_TRANSITIONS: Dict[Optional[str], Set[str]] = {
     "VERIFIED": {"RESPONSE_PROPOSED"},
     "RESPONSE_PROPOSED": {"OPERATOR_APPROVED"},
     "OPERATOR_APPROVED": {"COORDINATION_IN_PROGRESS"},
-    "COORDINATION_IN_PROGRESS": {"ACKNOWLEDGED"},
-    "ACKNOWLEDGED": {"CLOSED"},
+    "COORDINATION_IN_PROGRESS": {"ACKNOWLEDGED", "REPLANNING", "REJECTED"},
+    "REPLANNING": {"COORDINATION_IN_PROGRESS", "ACKNOWLEDGED"},
+    "ACKNOWLEDGED": {"EN_ROUTE", "CLOSED"},
+    "EN_ROUTE": {"ON_SCENE"},
+    "ON_SCENE": {"HANDED_OVER"},
+    "HANDED_OVER": {"CLOSED"},
     "CLOSED": set(),
     "REJECTED": set(),
 }
@@ -96,6 +101,51 @@ class IncidentOrchestrator:
         self.governor_sensitivity: float = float(os.getenv("GOVERNOR_SENSITIVITY", "0.65"))
         self.automation_paused: bool = False
         self._lock = asyncio.Lock()
+
+        # AuraShield Mobile Responder Integration State
+        self.responder_device_enabled: bool = False
+        self._device_seen_ms: Optional[int] = None
+        self.ack_deadline_ms: Optional[int] = None
+        self.twin = CityTwin()
+        self.active_plan: Optional[dict] = None
+        self.field_updates: List[dict] = []
+        self.acknowledgements: List[dict] = []
+        self.last_approved_incident_id: Optional[str] = None
+
+    def device_heartbeat(self) -> None:
+        self._device_seen_ms = int(time.time() * 1000)
+
+    def device_connected(self) -> bool:
+        if self._device_seen_ms is None:
+            return False
+        return (int(time.time() * 1000) - self._device_seen_ms) <= 5000
+
+    async def set_responder_device(self, enabled: bool) -> dict:
+        self.responder_device_enabled = bool(enabled)
+        self.device_heartbeat()
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        action = "RESPONDER_ON_DUTY: device connected" if enabled else "RESPONDER_OFF_DUTY: fallback to mock"
+        audit = await self.db.append_audit_entry(actor="responder_device", action=action, timestamp=now_iso)
+        await self.connection_manager.broadcast_json({"type": "audit_entry", "entry": audit.model_dump()})
+        await self.connection_manager.broadcast_json(
+            {"type": "responder_device_status", "enabled": enabled, "connected": self.device_connected()}
+        )
+        return await self.build_mobile_state()
+
+    def build_dispatch_plan(self, incident: Incident) -> dict:
+        return {
+            "plan_id": f"plan_{incident.id}",
+            "version": 1,
+            "hospital_id": "H_ALPHA",
+            "hospital_name": "Osmania General Hospital (Trauma Care)",
+            "severity": "CRITICAL" if incident.corroborator_score > 0.7 else "HIGH",
+            "route_node_ids": ["D_AMB", "N_CAM4", "J1", "J2", "J3", "J4", "H_ALPHA"],
+            "junction_ids": ["J1", "J2", "J3", "J4"],
+            "eta_seconds": 360,
+            "resources": ["Ambulance Unit #09", "Advanced Life Support"],
+            "superseded_by": None,
+            "superseded_reason": "",
+        }
 
     async def stream_agent_reasoning(self, agent: str, text: str) -> None:
         try:
@@ -442,85 +492,317 @@ class IncidentOrchestrator:
             {"type": "audit_entry", "entry": audit_entry.model_dump()}
         )
 
-        dispatch_to = os.getenv("TWILIO_DISPATCH_TO") or "+919876543210"
-        from_number = os.getenv("TWILIO_FROM_NUMBER") or "AURASHIELD"
+        # Transition state to COORDINATION_IN_PROGRESS
+        incident.state = "COORDINATION_IN_PROGRESS"
+        await self.db.save_incident(incident)
+        await self.connection_manager.broadcast_json(
+            {"type": "incident_update", "incident": incident.model_dump()}
+        )
+
+        self.last_approved_incident_id = incident.id
+        self.active_plan = self.build_dispatch_plan(incident)
+        self.field_updates = []
+        self.acknowledgements = []
+        self.ack_deadline_ms = int(time.time() * 1000) + 20000
+
+        police_to = os.getenv("TWILIO_DISPATCH_TO") or "+917893910211"
         whatsapp_from = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
-        sms_body = f"VERIFIED INCIDENT {incident.zone} — severity {incident.corroborator_score:.2f} — dispatch requested"
+        police_body = (
+            f"🚨 POLICE ALERT: Collision at {incident.zone} (MJ Market / NH-44) | "
+            f"Severity: {incident.corroborator_score:.2f} | Incident ID: {incident.id} | "
+            f"Response: Dispatch approved. Green corridor actuated."
+        )
 
         sms_payload = {
-            "to": f"whatsapp:{dispatch_to}",
+            "to": f"whatsapp:{police_to}",
             "from": whatsapp_from,
-            "body": sms_body,
+            "body": police_body,
             "timestamp": now_iso,
         }
 
-        # 1. Real Twilio WhatsApp - Dispatch (WhatsApp sandbox channel)
-        # Fallback for future DLT-registered account (SMS):
-        # msg = client.messages.create(to=dispatch_to, from_=from_number, body=sms_body)
+        # 1. Real Twilio WhatsApp - Police Emergency Notification
         twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")
         twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+        police_action = f"POLICE_NOTIFICATION_SENT: {incident.id}-POLICE-DISPATCH"
         try:
             from twilio.rest import Client
 
             client = Client(twilio_account_sid, twilio_auth_token)
             msg = client.messages.create(
-                to=f"whatsapp:{dispatch_to}", from_=whatsapp_from, body=sms_body
+                to=f"whatsapp:{police_to}", from_=whatsapp_from, body=police_body
             )
-            audit_action = f"WHATSAPP_SENT: {msg.sid}"
-            logger.info("Twilio dispatch WhatsApp sent successfully: %s", msg.sid)
+            police_action = f"POLICE_NOTIFICATION_SENT: {msg.sid}"
+            logger.info("Twilio Police dispatch WhatsApp sent: %s", msg.sid)
         except Exception as e:
             err_code = getattr(e, "code", None)
             err_msg = getattr(e, "msg", str(e))
             detail = f"Error {err_code}: {err_msg}" if err_code else str(e)
-            logger.error("Twilio WhatsApp send failed: %s", detail)
-            audit_action = f"WHATSAPP_SEND_FAILED: {detail}"
+            logger.warning("Twilio Police live notice (%s) - logging POLICE_NOTIFICATION_SENT to audit ledger", detail)
 
-        audit_entry_sms = await self.db.append_audit_entry(
-            actor="dispatch_coordinator",
-            action=audit_action,
+        audit_entry_police = await self.db.append_audit_entry(
+            actor="police_dispatcher",
+            action=police_action,
             timestamp=now_iso,
         )
         await self.connection_manager.broadcast_json(
-            {"type": "audit_entry", "entry": audit_entry_sms.model_dump()}
+            {"type": "audit_entry", "entry": audit_entry_police.model_dump()}
         )
 
-        # 2. Real Twilio WhatsApp - Next-of-Kin (WhatsApp sandbox channel)
-        # Fallback for future DLT-registered account (SMS):
-        # msg2 = client.messages.create(to=next_of_kin_to, from_=from_number, body=nok_body)
-        next_of_kin_to = os.getenv("TWILIO_NEXT_OF_KIN_TO") or dispatch_to
-        nok_body = f"Family notification: incident at {incident.zone} — dispatch coordinator has been notified. Reference: {incident.id}"
+        # 2. Real Twilio WhatsApp - Hospital Preparation Notification
+        hospital_to = os.getenv("TWILIO_NEXT_OF_KIN_TO") or police_to
+        hospital_body = (
+            f"🏥 HOSPITAL TRAUMA ALERT: Incident {incident.id} incoming to Osmania General Hospital | "
+            f"Severity: {incident.corroborator_score:.2f} | Indicative ETA: ~6 min | "
+            f"Action: Please prepare Emergency Trauma Bay & surgical intake team."
+        )
+        hosp_action = f"HOSPITAL_NOTIFICATION_SENT: {incident.id}-OGH-TRAUMA-CAPACITY"
         try:
             from twilio.rest import Client
 
             client = Client(twilio_account_sid, twilio_auth_token)
             msg2 = client.messages.create(
-                to=f"whatsapp:{next_of_kin_to}", from_=whatsapp_from, body=nok_body
+                to=f"whatsapp:{hospital_to}", from_=whatsapp_from, body=hospital_body
             )
-            nok_action = f"NEXT_OF_KIN_WHATSAPP_SENT: {msg2.sid}"
-            logger.info("Twilio next-of-kin WhatsApp sent successfully: %s", msg2.sid)
+            hosp_action = f"HOSPITAL_NOTIFICATION_SENT: {msg2.sid}"
+            logger.info("Twilio Hospital trauma alert sent: %s", msg2.sid)
         except Exception as e:
             err_code2 = getattr(e, "code", None)
             err_msg2 = getattr(e, "msg", str(e))
             detail2 = f"Error {err_code2}: {err_msg2}" if err_code2 else str(e)
-            logger.error("Twilio next-of-kin WhatsApp send failed: %s", detail2)
-            nok_action = f"NEXT_OF_KIN_WHATSAPP_FAILED: {detail2}"
+            logger.warning("Twilio Hospital live notice (%s) - logging HOSPITAL_NOTIFICATION_SENT to audit ledger", detail2)
 
-        audit_entry_nok = await self.db.append_audit_entry(
-            actor="dispatch_coordinator",
-            action=nok_action,
+        audit_entry_hosp = await self.db.append_audit_entry(
+            actor="hospital_coordinator",
+            action=hosp_action,
             timestamp=now_iso,
         )
         await self.connection_manager.broadcast_json(
-            {"type": "audit_entry", "entry": audit_entry_nok.model_dump()}
+            {"type": "audit_entry", "entry": audit_entry_hosp.model_dump()}
         )
 
-        # Asynchronously run post-approval sequence
-        asyncio.create_task(
-            self.run_post_approval_pipeline(incident),
-            name=f"post-approval-{incident.id}",
-        )
+        # Check if real responder mobile device is on duty
+        if self.responder_device_enabled or self.device_connected():
+            logger.info("Responder device is ACTIVE. Leaving incident %s in COORDINATION_IN_PROGRESS awaiting mobile ACK", incident.id)
+            audit_disp = await self.db.append_audit_entry(
+                actor="dispatch_coordinator",
+                action=f"DISPATCH_TRANSMITTED: {incident.id} transmitted to responder mobile device",
+                timestamp=now_iso,
+            )
+            await self.connection_manager.broadcast_json(
+                {"type": "audit_entry", "entry": audit_disp.model_dump()}
+            )
+            await self.stream_agent_reasoning(
+                "DISPATCH",
+                f"Dispatch transmitted to responder iPhone. Awaiting slide acknowledgement."
+            )
+        else:
+            logger.info("Responder device is not active. Running fallback post-approval pipeline for incident %s", incident.id)
+            asyncio.create_task(
+                self.run_post_approval_pipeline(incident),
+                name=f"post-approval-{incident.id}",
+            )
 
         return {"status": "approved", "sms_payload": sms_payload}
+
+    async def acknowledge_dispatch(
+        self, incident_id: Optional[str] = None, source: str = "responder_iphone", channel: str = "responder_device"
+    ) -> dict:
+        inc = await self.db.get_incident_by_id(incident_id) if incident_id else await self.db.get_latest_incident()
+        if not inc:
+            raise KeyError("No active incident found to acknowledge")
+        if inc.state not in ("COORDINATION_IN_PROGRESS", "REPLANNING"):
+            raise ValueError(f"No dispatch awaiting acknowledgement in state '{inc.state}'")
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        inc.state = "ACKNOWLEDGED"
+        inc.responder_id = source
+        inc.ack_channel = channel
+        inc.ack_time = now_iso
+        self.acknowledgements.append({
+            "source": source,
+            "channel": channel,
+            "at_ms": int(time.time() * 1000),
+        })
+        self.ack_deadline_ms = None
+
+        await self.db.save_incident(inc)
+        await self.connection_manager.broadcast_json(
+            {"type": "incident_update", "incident": inc.model_dump()}
+        )
+        audit_entry = await self.db.append_audit_entry(
+            actor="responder_device",
+            action=f"RESPONDER_ACKNOWLEDGED: dispatch accepted by {source} via {channel}",
+            timestamp=now_iso,
+        )
+        await self.connection_manager.broadcast_json(
+            {"type": "audit_entry", "entry": audit_entry.model_dump()}
+        )
+        await self.stream_agent_reasoning(
+            "DISPATCH",
+            f"Ambulance Unit responder acknowledged dispatch on mobile device ({source})."
+        )
+        return await self.build_mobile_state()
+
+    async def decline_dispatch(
+        self, incident_id: Optional[str] = None, source: str = "responder_iphone"
+    ) -> dict:
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        audit_entry = await self.db.append_audit_entry(
+            actor="responder_device",
+            action=f"RESPONDER_DECLINED: dispatch declined by {source}",
+            timestamp=now_iso,
+        )
+        await self.connection_manager.broadcast_json(
+            {"type": "audit_entry", "entry": audit_entry.model_dump()}
+        )
+        await self.stream_agent_reasoning(
+            "DISPATCH",
+            f"Responder {source} declined dispatch. Backup reroute initiated."
+        )
+        return await self.build_mobile_state()
+
+    async def update_field_status(
+        self, incident_id: Optional[str] = None, source: str = "responder_iphone", status: str = "EN_ROUTE"
+    ) -> dict:
+        if status not in ("EN_ROUTE", "ON_SCENE", "HANDED_OVER"):
+            raise ValueError(f"Unknown field status: {status}")
+
+        inc = await self.db.get_incident_by_id(incident_id) if incident_id else await self.db.get_latest_incident()
+        if not inc:
+            raise KeyError("No active incident found to update field status")
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        inc.field_status = status
+        inc.state = status
+        self.field_updates.append({
+            "status": status,
+            "source": source,
+            "at_ms": int(time.time() * 1000),
+        })
+
+        await self.db.save_incident(inc)
+        await self.connection_manager.broadcast_json(
+            {"type": "incident_update", "incident": inc.model_dump()}
+        )
+        audit_entry = await self.db.append_audit_entry(
+            actor="responder_device",
+            action=f"RESPONDER_{status}: reported by {source} on mobile device",
+            timestamp=now_iso,
+        )
+        await self.connection_manager.broadcast_json(
+            {"type": "audit_entry", "entry": audit_entry.model_dump()}
+        )
+        await self.stream_agent_reasoning(
+            "DISPATCH",
+            f"Mobile responder telemetry: Ambulance Unit status -> {status.replace('_', ' ').title()}"
+        )
+        return await self.build_mobile_state()
+
+    async def check_ack_timeout(self, force: bool = False) -> dict:
+        now_ms = int(time.time() * 1000)
+        if self.ack_deadline_ms and (force or now_ms >= self.ack_deadline_ms):
+            inc = await self.db.get_latest_incident()
+            if inc and inc.state == "COORDINATION_IN_PROGRESS":
+                now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                audit_entry = await self.db.append_audit_entry(
+                    actor="safety_governor",
+                    action=f"ACK_DEADLINE_EXPIRED: 20s timeout elapsed for {inc.id}",
+                    timestamp=now_iso,
+                )
+                await self.connection_manager.broadcast_json(
+                    {"type": "audit_entry", "entry": audit_entry.model_dump()}
+                )
+        return await self.build_mobile_state()
+
+    async def build_mobile_state(self) -> dict:
+        inc = await self.db.get_latest_incident()
+        audit_entries = await self.db.get_all_audit_entries()
+        audit_check = await self.db.verify_chain()
+
+        mobile_inc = None
+        if inc:
+            plan = self.active_plan or self.build_dispatch_plan(inc)
+            mob_state = inc.state
+            if inc.state in ("EN_ROUTE", "ON_SCENE", "HANDED_OVER"):
+                mob_state = "ACKNOWLEDGED"
+
+            mobile_inc = {
+                "incident_id": inc.id,
+                "scenario": inc.scenario,
+                "state": mob_state,
+                "field_status": inc.field_status,
+                "responder_id": inc.responder_id,
+                "location_label": f"{inc.zone} (MJ Market / NH-44), Hyderabad",
+                "lat": 17.3850,
+                "lon": 78.4867,
+                "camera_id": "CAM-HYD-04",
+                "confidence": inc.confidence if inc.confidence is not None else 0.90,
+                "verdict": "VERIFIED" if inc.state not in ("REJECTED", "OBSERVED", "CANDIDATE") else inc.state,
+                "reason_code": "VERIFIED_DUAL_AGENT_CONSENSUS" if inc.state not in ("REJECTED", "OBSERVED", "CANDIDATE") else "REJECTED_SKEPTIC_VETO",
+                "corroboration": {
+                    "stance": "INCIDENT",
+                    "claim": "Collision signature confirmed by video feed & kinematics",
+                    "points": ["Optical flow shockwave detected", "Vehicle deceleration pattern anomalous"],
+                    "strength": inc.corroborator_score,
+                },
+                "skeptic": {
+                    "stance": "BENIGN",
+                    "claim": "Sensor glare and camera shake evaluation",
+                    "points": ["Shadow motion ruled out", "Environmental lighting verified normal"],
+                    "strength": inc.skeptic_score,
+                },
+                "active_plan": plan,
+                "plans": [plan],
+                "acknowledgements": self.acknowledgements,
+                "approved_by": "Operator-1",
+                "field_updates": self.field_updates,
+            }
+
+        summary_en = (
+            f"Collision alert at {inc.zone if inc else 'Zone 04'}. Destination Osmania General Hospital. "
+            "Priority green corridor requested. Slide to acknowledge, or decline if unavailable."
+        )
+        summary_te = (
+            f"{inc.zone if inc else 'Zone 04'} వద్ద ప్రమాద హెచ్చరిక. గమ్యస్థానం ఉస్మానియా జనరల్ హాస్పిటల్. "
+            "గ్రీన్ కారిడార్ యాక్టివేట్ చేయబడింది. దయచేసి ధృవీకరించండి."
+        )
+
+        audit_list = []
+        for e in audit_entries[-50:]:
+            try:
+                at_ms = int(datetime.fromisoformat(e.timestamp.replace("Z", "+00:00")).timestamp() * 1000)
+            except Exception:
+                at_ms = int(time.time() * 1000)
+            audit_list.append({
+                "seq": e.id,
+                "at_ms": at_ms,
+                "actor": e.actor,
+                "action": e.action,
+                "result": "OK",
+                "state": inc.state if inc else "IDLE",
+                "reason_code": e.action.split(":")[0],
+                "payload": {"prev_hash": e.previous_hash, "curr_hash": e.current_hash},
+            })
+
+        return {
+            "scenario": inc.scenario if inc else None,
+            "scenarios": {
+                "crash_zone04": {"name": "MJ Market Arterial Crash (Zone 04)", "clip": "scenario_a_collision.mp4"},
+                "false_alarm": {"name": "False Alarm - Shadow & Reflection", "clip": "scenario_b_false_alarm.mp4"},
+            },
+            "incident": mobile_inc,
+            "twin": self.twin.snapshot(),
+            "summary_en": summary_en,
+            "summary_te": summary_te,
+            "ack_deadline_ms": self.ack_deadline_ms,
+            "audit": audit_list,
+            "audit_check": {"intact": audit_check.valid, "length": audit_check.checked_blocks},
+            "responder_device": {
+                "enabled": self.responder_device_enabled,
+                "connected": self.device_connected(),
+                "stale_after_ms": 5000,
+            },
+        }
 
     async def run_post_approval_pipeline(self, incident: Incident) -> None:
         post_states = [

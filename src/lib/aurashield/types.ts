@@ -6,6 +6,9 @@ export const STATES = [
   "OPERATOR_APPROVED",
   "COORDINATION_IN_PROGRESS",
   "ACKNOWLEDGED",
+  "EN_ROUTE",
+  "ON_SCENE",
+  "HANDED_OVER",
   "CLOSED",
 ] as const;
 
@@ -24,6 +27,10 @@ export interface Incident {
   media_file: string;
   timestamp: string;
   degraded?: boolean;
+  field_status?: string | null;
+  responder_id?: string | null;
+  ack_channel?: string | null;
+  ack_time?: string | null;
 }
 
 export interface AuditEntry {

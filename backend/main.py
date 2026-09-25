@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator, List, Literal, Optional
 from dotenv import load_dotenv
 
@@ -9,6 +10,7 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.verification import generate_reasoning
@@ -241,6 +243,26 @@ async def verify_audit_ledger() -> ChainVerifyResponse:
     return result
 
 
+@app.get(
+    "/audit/entries",
+    status_code=status.HTTP_200_OK,
+    response_model=List[AuditEntry],
+    summary="Get all immutable audit ledger entries in chronological order",
+)
+async def get_audit_entries() -> List[AuditEntry]:
+    return await db.get_all_audit_entries()
+
+
+@app.get(
+    "/audit/history",
+    status_code=status.HTTP_200_OK,
+    response_model=List[AuditEntry],
+    summary="Get all immutable audit ledger entries (alias for /audit/entries)",
+)
+async def get_audit_history() -> List[AuditEntry]:
+    return await db.get_all_audit_entries()
+
+
 
 class SignalActuationRequest(BaseModel):
     signal_id: str
@@ -264,6 +286,102 @@ async def log_signal_actuation(req: SignalActuationRequest) -> dict:
     )
     await connection_manager.broadcast_json({"type": "audit_entry", "entry": audit.model_dump()})
     return {"status": "actuated", "signal_id": req.signal_id, "audit_id": audit.id, "hash": audit.current_hash}
+
+
+# AuraShield Mobile Responder Integration Models
+class ResponderDeviceReq(BaseModel):
+    enabled: bool = True
+
+
+class AckReq(BaseModel):
+    source: str = "responder_iphone"
+    channel: str = "responder_device"
+
+
+class DeclineReq(BaseModel):
+    source: str = "responder_iphone"
+
+
+class FieldStatusReq(BaseModel):
+    source: str = "responder_iphone"
+    status: str = Field(..., pattern="^(EN_ROUTE|ON_SCENE|HANDED_OVER)$")
+
+
+class TimeoutReq(BaseModel):
+    force: bool = False
+
+
+# Asset paths for AuraShield tiles and video clips
+DATA_DIR = Path(__file__).resolve().parent.parent / "AuraShield-master" / "AuraShield-master" / "data"
+TILES_DIR = (DATA_DIR / "tiles").resolve()
+VIDEO_DIR = (DATA_DIR / "video").resolve()
+
+
+# AuraShield Mobile Compatibility Routes
+@app.get("/api/state", summary="[AuraShield] Unified state snapshot for mobile responder")
+async def get_mobile_state(client: str = "") -> dict:
+    if client == "responder":
+        orchestrator.device_heartbeat()
+    return await orchestrator.build_mobile_state()
+
+
+@app.post("/api/responder_device", summary="[AuraShield] Toggle mobile responder on-duty state")
+async def set_responder_device(req: ResponderDeviceReq) -> dict:
+    return await orchestrator.set_responder_device(req.enabled)
+
+
+@app.post("/api/ack", summary="[AuraShield] Mobile responder acknowledges dispatch")
+async def responder_ack(req: AckReq) -> dict:
+    orchestrator.device_heartbeat()
+    return await orchestrator.acknowledge_dispatch(source=req.source, channel=req.channel)
+
+
+@app.post("/api/decline", summary="[AuraShield] Mobile responder declines dispatch")
+async def responder_decline(req: DeclineReq) -> dict:
+    orchestrator.device_heartbeat()
+    return await orchestrator.decline_dispatch(source=req.source)
+
+
+@app.post("/api/field_status", summary="[AuraShield] Advance trip status: EN_ROUTE -> ON_SCENE -> HANDED_OVER")
+async def responder_field_status(req: FieldStatusReq) -> dict:
+    orchestrator.device_heartbeat()
+    return await orchestrator.update_field_status(source=req.source, status=req.status)
+
+
+@app.post("/api/timeout", summary="[AuraShield] Check dispatch acknowledgement deadline")
+async def responder_timeout(req: TimeoutReq) -> dict:
+    return await orchestrator.check_ack_timeout(force=req.force)
+
+
+@app.get("/api/assets", summary="[AuraShield] Check cached map tiles and video assets")
+async def get_assets() -> dict:
+    style = TILES_DIR / "style.txt"
+    attrib = TILES_DIR / "ATTRIBUTION.txt"
+    return {
+        "tiles_cached": TILES_DIR.is_dir() and any(TILES_DIR.glob("*/*/*.png")),
+        "tile_style": style.read_text().strip() if style.is_file() else None,
+        "tile_attribution": (attrib.read_text().strip().splitlines()[0] if attrib.is_file() else None),
+        "videos": (sorted(p.name for p in VIDEO_DIR.glob("*.mp4")) if VIDEO_DIR.is_dir() else []),
+    }
+
+
+@app.get("/tiles/{rel:path}", include_in_schema=False)
+async def serve_tile(rel: str) -> FileResponse:
+    target = (TILES_DIR / rel).resolve()
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Tile not found")
+    return FileResponse(target, media_type="image/png")
+
+
+@app.get("/video/{rel:path}", include_in_schema=False)
+async def serve_video(rel: str) -> FileResponse:
+    target = (VIDEO_DIR / rel).resolve()
+    if not target.is_file():
+        media_fallback = Path(__file__).resolve().parent.parent / "pixel-perfect-pixels-main" / "public" / "media" / rel
+        if media_fallback.is_file():
+            return FileResponse(media_fallback, media_type="video/mp4")
+        raise HTTPException(status_code=404, detail="Video not found")
+    return FileResponse(target, media_type="video/mp4")
 
 
 # Demo Endpoints (Demonstration-only, not part of production contract)

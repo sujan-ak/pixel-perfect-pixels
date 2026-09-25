@@ -31,6 +31,10 @@ class Incident(BaseModel):
     media_file: str
     timestamp: str
     degraded: Optional[bool] = False
+    field_status: Optional[str] = None
+    responder_id: Optional[str] = None
+    ack_channel: Optional[str] = None
+    ack_time: Optional[str] = None
 
 
 class ChainVerifyResponse(BaseModel):
