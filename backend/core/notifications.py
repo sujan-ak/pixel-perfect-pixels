@@ -117,10 +117,21 @@ def build_hospital_notification_message(
     )
 
 
+def emergency_refusal(phone: str) -> Optional[str]:
+    """Never dial or SMS real emergency numbers or short codes."""
+    digits = "".join(c for c in phone if c.isdigit())
+    if any(digits.endswith(s) for s in ("112", "108", "100", "101", "102", "911")):
+        return f"Refusing real emergency destination: {phone}"
+    if len(digits) <= 5 and digits:
+        return f"Refusing short-code destination: {phone}"
+    return None
+
+
 def get_police_recipient() -> str:
     """Resolve recipient phone number for police notifications from environment."""
     return (
-        os.getenv("TWILIO_POLICE_TO")
+        os.getenv("POLICE_PHONE")
+        or os.getenv("TWILIO_POLICE_TO")
         or os.getenv("TWILIO_DISPATCH_TO")
         or "+917893910211"
     )
@@ -130,7 +141,8 @@ def get_hospital_recipient(hospital_id: Optional[str] = None) -> str:
     """Resolve recipient phone number for hospital notifications according to hospital destination."""
     if hospital_id == "H_ALPHA":
         return (
-            os.getenv("TWILIO_HOSPITAL_ALPHA_TO")
+            os.getenv("HOSPITAL_PHONE")
+            or os.getenv("TWILIO_HOSPITAL_ALPHA_TO")
             or os.getenv("TWILIO_HOSPITAL_TO")
             or os.getenv("TWILIO_NEXT_OF_KIN_TO")
             or os.getenv("TWILIO_DISPATCH_TO")
@@ -138,25 +150,79 @@ def get_hospital_recipient(hospital_id: Optional[str] = None) -> str:
         )
     elif hospital_id == "H_BETA":
         return (
-            os.getenv("TWILIO_HOSPITAL_BETA_TO")
+            os.getenv("HOSPITAL_PHONE")
+            or os.getenv("TWILIO_HOSPITAL_BETA_TO")
             or os.getenv("TWILIO_HOSPITAL_TO")
             or os.getenv("TWILIO_NEXT_OF_KIN_TO")
             or os.getenv("TWILIO_DISPATCH_TO")
             or "+917893910211"
         )
     return (
-        os.getenv("TWILIO_HOSPITAL_TO")
+        os.getenv("HOSPITAL_PHONE")
+        or os.getenv("TWILIO_HOSPITAL_TO")
         or os.getenv("TWILIO_NEXT_OF_KIN_TO")
         or os.getenv("TWILIO_DISPATCH_TO")
         or "+917893910211"
     )
 
 
+def send_via_android_sms_gateway(
+    to: str, body: str
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Optional local Android SMS Gateway provider (capcom6/android-sms-gateway).
+    Sends real SMS via local Android phone's SIM card without Indian DLT restriction.
+    Never exposes or logs credentials.
+    """
+    import base64
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    gateway_url = os.getenv("SMS_GATEWAY_URL", "").strip().rstrip("/")
+    gateway_user = os.getenv("SMS_GATEWAY_USER", "").strip()
+    gateway_pass = os.getenv("SMS_GATEWAY_PASS", "")
+
+    if not gateway_url or not gateway_user or not gateway_pass:
+        return False, None, "SMS Gateway credentials unconfigured"
+
+    refusal = emergency_refusal(to)
+    if refusal:
+        return False, None, refusal
+
+    endpoint = f"{gateway_url}/messages"
+    payload = _json.dumps({
+        "textMessage": {"text": body},
+        "phoneNumbers": [to.strip()],
+    }).encode("utf-8")
+
+    req = urllib.request.Request(endpoint, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    auth_header = base64.b64encode(f"{gateway_user}:{gateway_pass}".encode("utf-8")).decode("ascii")
+    req.add_header("Authorization", f"Basic {auth_header}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            out = _json.loads(raw) if raw.strip() else {}
+            msg_id = out.get("id") or out.get("message_id") or "gateway_ok"
+            logger.info("Notification successfully dispatched via Android SMS Gateway (ID: %s)", msg_id)
+            return True, str(msg_id), None
+    except Exception as exc:
+        err_msg = f"SMS Gateway Error: {type(exc).__name__}: {exc}"
+        logger.warning(err_msg)
+        return False, None, err_msg
+
+
 def send_emergency_message(
     to: str, body: str, channel: Optional[str] = None
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
-    Send SMS or WhatsApp message via Twilio backend.
+    Send emergency alert message via configured notification provider.
+    Priority order:
+    1. Mock sender hook (for automated unit/integration tests)
+    2. Android SMS Gateway (if AURASHIELD_SMS_ENABLED=1 and channel in ('sms', None))
+    3. Twilio Provider (SMS, WhatsApp, or Voice with echo fallback)
     Returns (success, provider_id, error_message).
     Never logs or exposes credentials.
     """
@@ -181,11 +247,26 @@ def send_emergency_message(
         except Exception as e:
             return False, None, str(e)
 
+    # 1. Check emergency refusal safety check
+    refusal = emergency_refusal(to)
+    if refusal:
+        logger.warning("Emergency notification refused: %s", refusal)
+        return False, None, refusal
+
+    # 2. Check Android SMS Gateway provider (primary hackathon provider for real local SIM SMS)
+    sms_gateway_enabled = os.getenv("AURASHIELD_SMS_ENABLED", "0").strip() == "1"
+    if sms_gateway_enabled and resolved_channel in ("sms", "text"):
+        gw_ok, gw_id, gw_err = send_via_android_sms_gateway(to, body)
+        if gw_ok:
+            return True, gw_id, None
+        logger.warning("Android SMS Gateway attempt unsuccessful, falling back to Twilio: %s", gw_err)
+
+    # 3. Twilio provider (fallback SMS, WhatsApp, or Voice)
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
     if not account_sid or not auth_token:
-        err = "Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN in backend environment"
+        err = "Missing notification provider configuration (set SMS_GATEWAY_* or TWILIO_* credentials)"
         logger.warning(err)
         return False, None, err
 
@@ -197,21 +278,48 @@ def send_emergency_message(
         if resolved_channel == "whatsapp":
             from_number = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+17372508034")
             to_number = to if to.startswith("whatsapp:") else f"whatsapp:{to}"
-        else:
+            msg = client.messages.create(to=to_number, from_=from_number, body=body)
+            logger.info("Twilio notification delivered successfully via whatsapp (SID: %s)", msg.sid)
+            return True, msg.sid, None
+
+        elif resolved_channel == "voice":
+            from_number = (
+                os.getenv("TWILIO_FROM_NUMBER")
+                or os.getenv("TWILIO_FROM")
+                or "+17372508034"
+            )
+            # Support DEMO_CALLS_TO for Twilio trial accounts
+            target_phone = os.getenv("DEMO_CALLS_TO") or to.replace("whatsapp:", "")
+            twiml = f"<Response><Say voice='alice'>{body}</Say></Response>"
+            try:
+                call_res = client.calls.create(to=target_phone, from_=from_number, twiml=twiml)
+                logger.info("Twilio voice call placed successfully (SID: %s)", call_res.sid)
+                return True, call_res.sid, None
+            except Exception as call_err:
+                # Auto-fallback to echo url for Twilio trial accounts on 400 parameter rejection
+                import urllib.parse
+                echo_url = "https://twimlets.com/echo?Twiml=" + urllib.parse.quote(twiml)
+                call_res = client.calls.create(to=target_phone, from_=from_number, url=echo_url)
+                logger.info("Twilio voice call placed via echo URL fallback (SID: %s)", call_res.sid)
+                return True, call_res.sid, None
+
+        else:  # SMS
             from_number = (
                 os.getenv("TWILIO_FROM_NUMBER")
                 or os.getenv("TWILIO_FROM")
                 or "+17372508034"
             )
             to_number = to.replace("whatsapp:", "")
+            msg = client.messages.create(to=to_number, from_=from_number, body=body)
+            logger.info("Twilio notification delivered successfully via sms (SID: %s)", msg.sid)
+            return True, msg.sid, None
 
-        msg = client.messages.create(to=to_number, from_=from_number, body=body)
-        logger.info("Twilio notification delivered successfully via %s (SID: %s)", resolved_channel, msg.sid)
-        return True, msg.sid, None
     except Exception as e:
         err_code = getattr(e, "code", None)
         err_msg = getattr(e, "msg", str(e))
         detail = f"Twilio Error {err_code}: {err_msg}" if err_code else str(e)
+        if err_code == 21219 or "trial accounts have limited parameter access" in detail:
+            detail += " (trial account: recipient must be a Verified Caller ID in Twilio console, or set DEMO_CALLS_TO / AURASHIELD_SMS_ENABLED=1)"
         logger.warning("Twilio notification failed (%s)", detail)
         return False, None, detail
 

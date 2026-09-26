@@ -737,8 +737,8 @@ class IncidentOrchestrator:
             # Derive authoritative incident coordinates from CityTwin node N_CAM4
             nodes_list = self.twin.snapshot()["nodes"]
             cam_node = next((n for n in nodes_list if n["id"] == "N_CAM4"), None)
-            inc_lat = cam_node["lat"] if cam_node else 17.4400
-            inc_lon = cam_node["lon"] if cam_node else 78.3480
+            inc_lat = cam_node["lat"] if cam_node else 17.4401
+            inc_lon = cam_node["lon"] if cam_node else 78.3489
 
             mobile_inc = {
                 "incident_id": inc.id,
@@ -785,12 +785,17 @@ class IncidentOrchestrator:
                 for n in notifs
             ]
 
+        hosp_name = (
+            plan.get("hospital_name")
+            if (inc and plan)
+            else "Sunshine Hospital, Gachibowli"
+        )
         summary_en = (
-            f"Collision alert at {inc.zone if inc else 'Zone 04'}. Destination Osmania General Hospital. "
+            f"Collision alert at {inc.zone if inc else 'Zone 04'}. Destination {hosp_name}. "
             "Priority green corridor requested. Slide to acknowledge, or decline if unavailable."
         )
         summary_te = (
-            f"{inc.zone if inc else 'Zone 04'} వద్ద ప్రమాద హెచ్చరిక. గమ్యస్థానం ఉస్మానియా జనరల్ హాస్పిటల్. "
+            f"{inc.zone if inc else 'Zone 04'} వద్ద ప్రమాద హెచ్చరిక. గమ్యస్థానం {hosp_name}. "
             "గ్రీన్ కారిడార్ యాక్టివేట్ చేయబడింది. దయచేసి ధృవీకరించండి."
         )
 

@@ -317,7 +317,7 @@ async def run_all_tests():
     if not mobile_dir.exists():
         mobile_dir = Path("c:/Users/sujan/Downloads/pixel-perfect-pixels-main/AuraShield-master/AuraShield-master/mobile")
 
-    forbidden_terms = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "twilio.rest", "AC1ad1d7"]
+    forbidden_terms = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "twilio.rest", "AC1ad1d7", "SMS_GATEWAY_PASS"]
     found = []
     mobile_src = mobile_dir / "src"
     if mobile_src.exists():
@@ -343,6 +343,10 @@ async def run_all_tests():
     print("\n" + "=" * 70)
     print(">>> ALL 14 NOTIFICATION UNIT & INTEGRATION TESTS PASSED! <<<")
     print("=" * 70)
+
+
+def test_notifications():
+    asyncio.run(run_all_tests())
 
 
 if __name__ == "__main__":

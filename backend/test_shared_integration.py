@@ -1,7 +1,7 @@
 import asyncio
 import time
 from fastapi.testclient import TestClient
-from main import app
+from main import app, orchestrator
 
 def run_integration_test():
     with TestClient(app) as client:
@@ -30,6 +30,8 @@ def run_integration_test():
 
         # 3. Trigger crash_zone04
         print("\n[STEP 3] Triggering crash_zone04 incident...")
+        orchestrator.running_scenarios.clear()
+        orchestrator.last_scenario_times.clear()
         r = client.post("/incidents/trigger", json={"scenario": "crash_zone04"})
         assert r.status_code == 202, f"Failed to trigger incident: {r.text}"
         inc_data = r.json()
@@ -158,6 +160,11 @@ def run_integration_test():
         print("\n==================================================================")
         print(">>> ALL 12 INTEGRATION CRITERIA PASSED WITH ZERO ERRORS! <<<")
         print("==================================================================")
+
+
+def test_shared_integration():
+    run_integration_test()
+
 
 if __name__ == "__main__":
     run_integration_test()
