@@ -127,7 +127,9 @@ def run_integration_test():
 
         # Check notification entries
         has_police = any("POLICE_NOTIFICATION_SENT" in a for a in actions)
+        has_police_call = any("POLICE_CALL" in a for a in actions)
         has_hospital = any("HOSPITAL_NOTIFICATION_SENT" in a for a in actions)
+        has_hospital_call = any("HOSPITAL_CALL" in a for a in actions)
         has_ack = any("RESPONDER_ACKNOWLEDGED" in a for a in actions)
         has_en_route = any("RESPONDER_EN_ROUTE" in a for a in actions)
         has_on_scene = any("RESPONDER_ON_SCENE" in a for a in actions)
@@ -135,7 +137,9 @@ def run_integration_test():
         has_handed_over = any("RESPONDER_HANDED_OVER" in a for a in actions)
 
         print(f" POLICE_NOTIFICATION_SENT recorded: {has_police}")
+        print(f" POLICE_CALL (sent/failed) recorded: {has_police_call}")
         print(f" HOSPITAL_NOTIFICATION_SENT recorded: {has_hospital}")
+        print(f" HOSPITAL_CALL (sent/failed) recorded: {has_hospital_call}")
         print(f" RESPONDER_ACKNOWLEDGED recorded: {has_ack}")
         print(f" RESPONDER_EN_ROUTE recorded: {has_en_route}")
         print(f" RESPONDER_ON_SCENE recorded: {has_on_scene}")
@@ -143,7 +147,9 @@ def run_integration_test():
         print(f" RESPONDER_HANDED_OVER recorded: {has_handed_over}")
 
         assert has_police, "Missing POLICE_NOTIFICATION_SENT in audit ledger!"
+        assert has_police_call, "Missing POLICE_CALL in audit ledger!"
         assert has_hospital, "Missing HOSPITAL_NOTIFICATION_SENT in audit ledger!"
+        assert has_hospital_call, "Missing HOSPITAL_CALL in audit ledger!"
         assert has_ack, "Missing RESPONDER_ACKNOWLEDGED in audit ledger!"
         assert has_en_route, "Missing RESPONDER_EN_ROUTE in audit ledger!"
         assert has_on_scene, "Missing RESPONDER_ON_SCENE in audit ledger!"

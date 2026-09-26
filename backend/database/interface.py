@@ -111,7 +111,7 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     async def get_notifications_for_incident(
-        self, incident_id: str, notification_type: Optional[str] = None
+        self, incident_id: str, notification_type: Optional[str] = None, channel: Optional[str] = None
     ) -> List[EmergencyNotification]:
         """Fetch all emergency notification records for an incident."""
         pass

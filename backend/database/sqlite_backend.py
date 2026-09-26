@@ -458,28 +458,27 @@ class SqliteBackend(DatabaseBackend):
                 return notif
 
     async def get_notifications_for_incident(
-        self, incident_id: str, notification_type: Optional[str] = None
+        self, incident_id: str, notification_type: Optional[str] = None, channel: Optional[str] = None
     ) -> List[EmergencyNotification]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
+            conditions = ["incident_id = ?"]
+            params = [incident_id]
             if notification_type:
-                cursor = await db.execute(
-                    """
-                    SELECT * FROM emergency_notifications
-                    WHERE incident_id = ? AND notification_type = ?
-                    ORDER BY id ASC
-                    """,
-                    (incident_id, notification_type),
-                )
-            else:
-                cursor = await db.execute(
-                    """
-                    SELECT * FROM emergency_notifications
-                    WHERE incident_id = ?
-                    ORDER BY id ASC
-                    """,
-                    (incident_id,),
-                )
+                conditions.append("notification_type = ?")
+                params.append(notification_type)
+            if channel:
+                conditions.append("channel = ?")
+                params.append(channel.upper())
+            where_sql = " AND ".join(conditions)
+            cursor = await db.execute(
+                f"""
+                SELECT * FROM emergency_notifications
+                WHERE {where_sql}
+                ORDER BY id ASC
+                """,
+                tuple(params),
+            )
             rows = await cursor.fetchall()
             return [
                 EmergencyNotification(

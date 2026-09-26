@@ -91,6 +91,24 @@ def build_police_notification_message(
     )
 
 
+def build_police_call_message(
+    incident: Incident, location_label: Optional[str] = None
+) -> str:
+    """
+    Build dynamic spoken voice message for Police emergency call.
+    Includes explicit demo disclaimer.
+    """
+    loc = location_label or f"{incident.zone} (NH-44 Gachibowli Junction), Hyderabad"
+    severity_str = format_severity(incident.corroborator_score)
+    return (
+        f"This is an AuraShield demo alert, not a real emergency service call. "
+        f"A road accident was reported at {loc}. "
+        f"Severity is {severity_str}. "
+        f"Incident ID is {incident.id}. "
+        f"Ambulance response initiated. Please proceed for assistance."
+    )
+
+
 def build_hospital_notification_message(
     incident: Incident, plan: dict, location_label: Optional[str] = None
 ) -> str:
@@ -114,6 +132,26 @@ def build_hospital_notification_message(
         f"Severity: {severity_str}.\n"
         f"ETA: {eta_str}.\n"
         f"Please prepare bed and required medical resources."
+    )
+
+
+def build_hospital_call_message(
+    incident: Incident, plan: dict, location_label: Optional[str] = None
+) -> str:
+    """
+    Build dynamic spoken voice message for Hospital emergency desk call.
+    Includes explicit demo disclaimer.
+    """
+    loc = location_label or f"{incident.zone} (NH-44 Gachibowli Junction), Hyderabad"
+    hosp_name = plan.get("hospital_name") or "Emergency Trauma Center"
+    eta_sec = plan.get("eta_seconds", 0)
+    eta_str = format_eta(eta_sec)
+    severity_str = format_severity(incident.corroborator_score)
+    return (
+        f"This is an AuraShield demo alert, not a real emergency service call. "
+        f"Alert for {hosp_name} emergency desk. An accident patient with {severity_str} severity "
+        f"from {loc} is coming to your hospital by ambulance. "
+        f"Estimated arrival in {eta_str}. Please keep an emergency bed and a doctor ready."
     )
 
 
@@ -329,31 +367,60 @@ async def dispatch_police_notification(
     incident: Incident,
     location_label: Optional[str] = None,
     connection_manager: Optional[Any] = None,
+    channel: Optional[str] = None,
 ) -> Optional[EmergencyNotification]:
     """
     Trigger idempotent Police Emergency Notification upon incident approval.
+    Dispatches Police SMS and attempts Police CALL (voice).
+    If channel is 'SMS' or 'VOICE', executes that specific channel.
+    If channel is None, executes both SMS and CALL.
     """
-    # 1. Idempotency Check
-    existing = await db.get_notifications_for_incident(incident.id, "POLICE")
-    already_sent = any(n.status == "SENT" for n in existing)
-    if already_sent:
-        logger.info("Police notification for incident %s already SENT (idempotent no-op)", incident.id)
+    if channel is None:
+        sms_notif = await dispatch_police_notification(
+            db=db,
+            incident=incident,
+            location_label=location_label,
+            connection_manager=connection_manager,
+            channel="SMS",
+        )
+        call_notif = await dispatch_police_notification(
+            db=db,
+            incident=incident,
+            location_label=location_label,
+            connection_manager=connection_manager,
+            channel="VOICE",
+        )
+        return sms_notif or call_notif
+
+    resolved_channel = channel.upper()
+    existing = await db.get_notifications_for_incident(
+        incident.id, "POLICE", channel=resolved_channel
+    )
+    if any(n.status == "SENT" for n in existing):
+        logger.info(
+            "Police %s notification for incident %s already SENT (idempotent no-op)",
+            resolved_channel,
+            incident.id,
+        )
         return None
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     recipient = get_police_recipient()
-    channel = os.getenv("TWILIO_CHANNEL", "sms").upper()
-    body = build_police_notification_message(incident, location_label)
 
-    # 2. Dispatch via Twilio (or mock sender)
-    success, sid, error = send_emergency_message(recipient, body, channel=channel)
+    if resolved_channel == "VOICE":
+        body = build_police_call_message(incident, location_label)
+        success, sid, error = send_emergency_message(recipient, body, channel="voice")
+        action_prefix = "POLICE_CALL"
+    else:  # SMS
+        body = build_police_notification_message(incident, location_label)
+        success, sid, error = send_emergency_message(recipient, body, channel="sms")
+        action_prefix = "POLICE_NOTIFICATION"
 
-    # 3. Persist EmergencyNotification record
     notification = EmergencyNotification(
         incident_id=incident.id,
         notification_type="POLICE",
         recipient=recipient,
-        channel=channel,
+        channel=resolved_channel,
         trigger_event="INCIDENT_APPROVED",
         timestamp=now_iso,
         status="SENT" if success else "FAILED",
@@ -363,11 +430,10 @@ async def dispatch_police_notification(
     )
     saved_notification = await db.record_notification(notification)
 
-    # 4. Append to Audit Ledger
     action_str = (
-        f"POLICE_NOTIFICATION_SENT: {sid or f'{incident.id}-POLICE-DISPATCH'}"
+        f"{action_prefix}_SENT: {sid or f'{incident.id}-POLICE-{resolved_channel}'}"
         if success
-        else f"POLICE_NOTIFICATION_FAILED: {error or 'Twilio dispatch failed'}"
+        else f"{action_prefix}_FAILED: {error or f'Police {resolved_channel} dispatch failed'}"
     )
     audit_entry = await db.append_audit_entry(
         actor="police_dispatcher",
@@ -392,33 +458,63 @@ async def dispatch_hospital_notification(
     plan: dict,
     location_label: Optional[str] = None,
     connection_manager: Optional[Any] = None,
+    channel: Optional[str] = None,
 ) -> Optional[EmergencyNotification]:
     """
     Trigger idempotent Hospital Notification ONLY after PATIENT_LOADED (Stage 2).
-    Uses the exact Stage 2 routing plan (hospital_id, hospital_name, eta_seconds).
+    Dispatches Hospital SMS and attempts Hospital CALL (voice).
+    If channel is 'SMS' or 'VOICE', executes that specific channel.
+    If channel is None, executes both SMS and CALL.
     """
-    # 1. Idempotency Check
-    existing = await db.get_notifications_for_incident(incident.id, "HOSPITAL")
-    already_sent = any(n.status == "SENT" for n in existing)
-    if already_sent:
-        logger.info("Hospital notification for incident %s already SENT (idempotent no-op)", incident.id)
+    if channel is None:
+        sms_notif = await dispatch_hospital_notification(
+            db=db,
+            incident=incident,
+            plan=plan,
+            location_label=location_label,
+            connection_manager=connection_manager,
+            channel="SMS",
+        )
+        call_notif = await dispatch_hospital_notification(
+            db=db,
+            incident=incident,
+            plan=plan,
+            location_label=location_label,
+            connection_manager=connection_manager,
+            channel="VOICE",
+        )
+        return sms_notif or call_notif
+
+    resolved_channel = channel.upper()
+    existing = await db.get_notifications_for_incident(
+        incident.id, "HOSPITAL", channel=resolved_channel
+    )
+    if any(n.status == "SENT" for n in existing):
+        logger.info(
+            "Hospital %s notification for incident %s already SENT (idempotent no-op)",
+            resolved_channel,
+            incident.id,
+        )
         return None
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     hospital_id = plan.get("hospital_id")
     recipient = get_hospital_recipient(hospital_id)
-    channel = os.getenv("TWILIO_CHANNEL", "sms").upper()
-    body = build_hospital_notification_message(incident, plan, location_label)
 
-    # 2. Dispatch via Twilio (or mock sender)
-    success, sid, error = send_emergency_message(recipient, body, channel=channel)
+    if resolved_channel == "VOICE":
+        body = build_hospital_call_message(incident, plan, location_label)
+        success, sid, error = send_emergency_message(recipient, body, channel="voice")
+        action_prefix = "HOSPITAL_CALL"
+    else:  # SMS
+        body = build_hospital_notification_message(incident, plan, location_label)
+        success, sid, error = send_emergency_message(recipient, body, channel="sms")
+        action_prefix = "HOSPITAL_NOTIFICATION"
 
-    # 3. Persist EmergencyNotification record
     notification = EmergencyNotification(
         incident_id=incident.id,
         notification_type="HOSPITAL",
         recipient=recipient,
-        channel=channel,
+        channel=resolved_channel,
         trigger_event="PATIENT_LOADED",
         timestamp=now_iso,
         status="SENT" if success else "FAILED",
@@ -428,11 +524,10 @@ async def dispatch_hospital_notification(
     )
     saved_notification = await db.record_notification(notification)
 
-    # 4. Append to Audit Ledger
     action_str = (
-        f"HOSPITAL_NOTIFICATION_SENT: {sid or f'{incident.id}-{hospital_id}-CAPACITY'}"
+        f"{action_prefix}_SENT: {sid or f'{incident.id}-{hospital_id}-{resolved_channel}'}"
         if success
-        else f"HOSPITAL_NOTIFICATION_FAILED: {error or 'Twilio dispatch failed'}"
+        else f"{action_prefix}_FAILED: {error or f'Hospital {resolved_channel} dispatch failed'}"
     )
     audit_entry = await db.append_audit_entry(
         actor="hospital_coordinator",
