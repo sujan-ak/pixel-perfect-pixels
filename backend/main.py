@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 import logging
 import os
@@ -40,11 +41,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     backend_mode = os.getenv("DB_BACKEND", "sqlite").lower()
     logger.info("Initializing AuraShield backend with active DB_BACKEND='%s'", backend_mode)
     await db.init_db()
-    logger.info("Executing startup warm-up call for Hugging Face reasoning model...")
-    warmup_res = await generate_reasoning(
-        "OBSERVED", "warmup", "test", 0.5, 0.5, 0.0, fallback="warmup"
-    )
-    logger.info("Hugging Face warm-up response: %s", warmup_res)
+
+    async def _async_warmup():
+        try:
+            logger.info("Executing non-blocking background warm-up call for Hugging Face reasoning model...")
+            warmup_res = await asyncio.wait_for(
+                generate_reasoning("OBSERVED", "warmup", "test", 0.5, 0.5, 0.0, fallback="warmup"),
+                timeout=5.0,
+            )
+            logger.info("Hugging Face warm-up response: %s", warmup_res)
+        except Exception as e:
+            logger.warning("Hugging Face warm-up timed out or failed (non-blocking): %s", e)
+
+    asyncio.create_task(_async_warmup())
     yield
     logger.info("Shutting down AuraShield backend...")
 
@@ -54,11 +63,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-
-
-@app.on_event("startup")
-async def warm_up_hf():
-    await generate_reasoning("OBSERVED", "warmup", "test", 0.5, 0.5, 0.0, fallback="warmup")
 
 app.add_middleware(
     CORSMiddleware,

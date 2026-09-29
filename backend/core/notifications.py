@@ -165,43 +165,50 @@ def emergency_refusal(phone: str) -> Optional[str]:
     return None
 
 
-def get_police_recipient() -> str:
+def get_police_recipient() -> Optional[str]:
     """Resolve recipient phone number for police notifications from environment."""
-    return (
+    val = (
         os.getenv("POLICE_PHONE")
         or os.getenv("TWILIO_POLICE_TO")
         or os.getenv("TWILIO_DISPATCH_TO")
-        or "+917893910211"
     )
+    if val:
+        val = val.strip()
+        if val and not val.endswith("XXXXXXXXXX"):
+            return val
+    return None
 
 
-def get_hospital_recipient(hospital_id: Optional[str] = None) -> str:
+def get_hospital_recipient(hospital_id: Optional[str] = None) -> Optional[str]:
     """Resolve recipient phone number for hospital notifications according to hospital destination."""
     if hospital_id == "H_ALPHA":
-        return (
+        val = (
             os.getenv("HOSPITAL_PHONE")
             or os.getenv("TWILIO_HOSPITAL_ALPHA_TO")
             or os.getenv("TWILIO_HOSPITAL_TO")
             or os.getenv("TWILIO_NEXT_OF_KIN_TO")
             or os.getenv("TWILIO_DISPATCH_TO")
-            or "+917893910211"
         )
     elif hospital_id == "H_BETA":
-        return (
+        val = (
             os.getenv("HOSPITAL_PHONE")
             or os.getenv("TWILIO_HOSPITAL_BETA_TO")
             or os.getenv("TWILIO_HOSPITAL_TO")
             or os.getenv("TWILIO_NEXT_OF_KIN_TO")
             or os.getenv("TWILIO_DISPATCH_TO")
-            or "+917893910211"
         )
-    return (
-        os.getenv("HOSPITAL_PHONE")
-        or os.getenv("TWILIO_HOSPITAL_TO")
-        or os.getenv("TWILIO_NEXT_OF_KIN_TO")
-        or os.getenv("TWILIO_DISPATCH_TO")
-        or "+917893910211"
-    )
+    else:
+        val = (
+            os.getenv("HOSPITAL_PHONE")
+            or os.getenv("TWILIO_HOSPITAL_TO")
+            or os.getenv("TWILIO_NEXT_OF_KIN_TO")
+            or os.getenv("TWILIO_DISPATCH_TO")
+        )
+    if val:
+        val = val.strip()
+        if val and not val.endswith("XXXXXXXXXX"):
+            return val
+    return None
 
 
 def send_via_android_sms_gateway(
@@ -311,21 +318,25 @@ def send_emergency_message(
     try:
         from twilio.rest import Client
 
-        client = Client(account_sid, auth_token)
+        from_num = (
+            os.getenv("TWILIO_FROM_NUMBER")
+            or os.getenv("TWILIO_FROM")
+            or ""
+        ).strip()
 
         if resolved_channel == "whatsapp":
-            from_number = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+17372508034")
+            from_number = os.getenv("TWILIO_WHATSAPP_FROM") or (f"whatsapp:{from_num}" if from_num else "")
+            if not from_number:
+                return False, None, "Missing TWILIO_WHATSAPP_FROM / TWILIO_FROM configuration"
             to_number = to if to.startswith("whatsapp:") else f"whatsapp:{to}"
             msg = client.messages.create(to=to_number, from_=from_number, body=body)
             logger.info("Twilio notification delivered successfully via whatsapp (SID: %s)", msg.sid)
             return True, msg.sid, None
 
         elif resolved_channel == "voice":
-            from_number = (
-                os.getenv("TWILIO_FROM_NUMBER")
-                or os.getenv("TWILIO_FROM")
-                or "+17372508034"
-            )
+            if not from_num:
+                return False, None, "Missing TWILIO_FROM / TWILIO_FROM_NUMBER configuration"
+            from_number = from_num
             # Support DEMO_CALLS_TO for Twilio trial accounts
             target_phone = os.getenv("DEMO_CALLS_TO") or to.replace("whatsapp:", "")
             twiml = f"<Response><Say voice='alice'>{body}</Say></Response>"
@@ -342,11 +353,9 @@ def send_emergency_message(
                 return True, call_res.sid, None
 
         else:  # SMS
-            from_number = (
-                os.getenv("TWILIO_FROM_NUMBER")
-                or os.getenv("TWILIO_FROM")
-                or "+17372508034"
-            )
+            if not from_num:
+                return False, None, "Missing TWILIO_FROM / TWILIO_FROM_NUMBER configuration"
+            from_number = from_num
             to_number = to.replace("whatsapp:", "")
             msg = client.messages.create(to=to_number, from_=from_number, body=body)
             logger.info("Twilio notification delivered successfully via sms (SID: %s)", msg.sid)
@@ -406,15 +415,43 @@ async def dispatch_police_notification(
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     recipient = get_police_recipient()
+    action_prefix = "POLICE_CALL" if resolved_channel == "VOICE" else "POLICE_NOTIFICATION"
+
+    if not recipient:
+        logger.warning("Police %s notification skipped: no recipient phone configured in environment", resolved_channel)
+        notification = EmergencyNotification(
+            incident_id=incident.id,
+            notification_type="POLICE",
+            recipient="UNCONFIGURED",
+            channel=resolved_channel,
+            trigger_event="INCIDENT_APPROVED",
+            timestamp=now_iso,
+            status="SKIPPED",
+            message_body=f"Police {resolved_channel} skipped: no recipient configured in environment",
+            provider_id=None,
+            error_message="No recipient configured in environment",
+        )
+        saved_notification = await db.record_notification(notification)
+        audit_entry = await db.append_audit_entry(
+            actor="police_dispatcher",
+            action=f"{action_prefix}_SKIPPED: no recipient configured in environment",
+            timestamp=now_iso,
+        )
+        if connection_manager:
+            await connection_manager.broadcast_json(
+                {"type": "audit_entry", "entry": audit_entry.model_dump()}
+            )
+            await connection_manager.broadcast_json(
+                {"type": "notification_update", "notification": saved_notification.model_dump()}
+            )
+        return saved_notification
 
     if resolved_channel == "VOICE":
         body = build_police_call_message(incident, location_label)
         success, sid, error = send_emergency_message(recipient, body, channel="voice")
-        action_prefix = "POLICE_CALL"
     else:  # SMS
         body = build_police_notification_message(incident, location_label)
         success, sid, error = send_emergency_message(recipient, body, channel="sms")
-        action_prefix = "POLICE_NOTIFICATION"
 
     notification = EmergencyNotification(
         incident_id=incident.id,
@@ -500,15 +537,43 @@ async def dispatch_hospital_notification(
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     hospital_id = plan.get("hospital_id")
     recipient = get_hospital_recipient(hospital_id)
+    action_prefix = "HOSPITAL_CALL" if resolved_channel == "VOICE" else "HOSPITAL_NOTIFICATION"
+
+    if not recipient:
+        logger.warning("Hospital %s notification skipped: no recipient phone configured for %s", resolved_channel, hospital_id)
+        notification = EmergencyNotification(
+            incident_id=incident.id,
+            notification_type="HOSPITAL",
+            recipient="UNCONFIGURED",
+            channel=resolved_channel,
+            trigger_event="PATIENT_LOADED",
+            timestamp=now_iso,
+            status="SKIPPED",
+            message_body=f"Hospital {resolved_channel} skipped: no recipient configured for {hospital_id}",
+            provider_id=None,
+            error_message=f"No recipient configured in environment for {hospital_id}",
+        )
+        saved_notification = await db.record_notification(notification)
+        audit_entry = await db.append_audit_entry(
+            actor="hospital_coordinator",
+            action=f"{action_prefix}_SKIPPED: no recipient configured for {hospital_id}",
+            timestamp=now_iso,
+        )
+        if connection_manager:
+            await connection_manager.broadcast_json(
+                {"type": "audit_entry", "entry": audit_entry.model_dump()}
+            )
+            await connection_manager.broadcast_json(
+                {"type": "notification_update", "notification": saved_notification.model_dump()}
+            )
+        return saved_notification
 
     if resolved_channel == "VOICE":
         body = build_hospital_call_message(incident, plan, location_label)
         success, sid, error = send_emergency_message(recipient, body, channel="voice")
-        action_prefix = "HOSPITAL_CALL"
     else:  # SMS
         body = build_hospital_notification_message(incident, plan, location_label)
         success, sid, error = send_emergency_message(recipient, body, channel="sms")
-        action_prefix = "HOSPITAL_NOTIFICATION"
 
     notification = EmergencyNotification(
         incident_id=incident.id,

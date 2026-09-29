@@ -554,12 +554,12 @@ class IncidentOrchestrator:
             connection_manager=self.connection_manager,
         )
 
-        police_recipient = get_police_recipient()
+        police_recipient = get_police_recipient() or "UNCONFIGURED"
         police_body = build_police_notification_message(incident, location_label)
         police_from = (
             os.getenv("TWILIO_FROM_NUMBER")
             or os.getenv("TWILIO_FROM")
-            or "+17372508034"
+            or "UNCONFIGURED"
         )
         sms_payload = {
             "to": police_recipient,
