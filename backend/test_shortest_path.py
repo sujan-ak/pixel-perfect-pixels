@@ -94,6 +94,8 @@ def test_orchestrator_build_dispatch_plan():
 
 def test_api_state_exposes_dijkstra_route():
     print("\n--- TEST 5: API /api/state Exposes Dijkstra Route to Mobile ---")
+    orchestrator.running_scenarios.clear()
+    orchestrator.last_scenario_times.clear()
     with TestClient(app) as client:
         # Put responder on duty
         client.post("/api/responder_device", json={"enabled": True})

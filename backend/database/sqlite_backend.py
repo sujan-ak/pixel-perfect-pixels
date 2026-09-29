@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -94,6 +95,7 @@ class SqliteBackend(DatabaseBackend):
                 "responder_id TEXT DEFAULT NULL",
                 "ack_channel TEXT DEFAULT NULL",
                 "ack_time TEXT DEFAULT NULL",
+                "memory TEXT DEFAULT NULL",
             ]:
                 try:
                     await db.execute(f"ALTER TABLE incidents ADD COLUMN {col};")
@@ -295,9 +297,9 @@ class SqliteBackend(DatabaseBackend):
                 INSERT INTO incidents (
                     id, state, zone, scenario, corroborator_score, skeptic_score,
                     fused_score, confidence, reasoning, media_file, timestamp, degraded,
-                    field_status, responder_id, ack_channel, ack_time, updated_at
+                    field_status, responder_id, ack_channel, ack_time, memory, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
                     zone = excluded.zone,
@@ -314,6 +316,7 @@ class SqliteBackend(DatabaseBackend):
                     responder_id = excluded.responder_id,
                     ack_channel = excluded.ack_channel,
                     ack_time = excluded.ack_time,
+                    memory = excluded.memory,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
@@ -333,6 +336,7 @@ class SqliteBackend(DatabaseBackend):
                     incident.responder_id,
                     incident.ack_channel,
                     incident.ack_time,
+                    json.dumps(incident.memory) if incident.memory is not None else None,
                 ),
             )
             await db.commit()
@@ -365,6 +369,7 @@ class SqliteBackend(DatabaseBackend):
                 responder_id=row["responder_id"] if "responder_id" in keys else None,
                 ack_channel=row["ack_channel"] if "ack_channel" in keys else None,
                 ack_time=row["ack_time"] if "ack_time" in keys else None,
+                memory=json.loads(row["memory"]) if ("memory" in keys and row["memory"]) else None,
             )
 
     async def get_incident_by_id(self, incident_id: str) -> Optional[Incident]:
@@ -392,6 +397,7 @@ class SqliteBackend(DatabaseBackend):
                 responder_id=row["responder_id"] if "responder_id" in keys else None,
                 ack_channel=row["ack_channel"] if "ack_channel" in keys else None,
                 ack_time=row["ack_time"] if "ack_time" in keys else None,
+                memory=json.loads(row["memory"]) if ("memory" in keys and row["memory"]) else None,
             )
 
     async def get_incident_history(self) -> List[Incident]:
@@ -458,28 +464,27 @@ class SqliteBackend(DatabaseBackend):
                 return notif
 
     async def get_notifications_for_incident(
-        self, incident_id: str, notification_type: Optional[str] = None
+        self, incident_id: str, notification_type: Optional[str] = None, channel: Optional[str] = None
     ) -> List[EmergencyNotification]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
+            conditions = ["incident_id = ?"]
+            params = [incident_id]
             if notification_type:
-                cursor = await db.execute(
-                    """
-                    SELECT * FROM emergency_notifications
-                    WHERE incident_id = ? AND notification_type = ?
-                    ORDER BY id ASC
-                    """,
-                    (incident_id, notification_type),
-                )
-            else:
-                cursor = await db.execute(
-                    """
-                    SELECT * FROM emergency_notifications
-                    WHERE incident_id = ?
-                    ORDER BY id ASC
-                    """,
-                    (incident_id,),
-                )
+                conditions.append("notification_type = ?")
+                params.append(notification_type)
+            if channel:
+                conditions.append("channel = ?")
+                params.append(channel.upper())
+            where_sql = " AND ".join(conditions)
+            cursor = await db.execute(
+                f"""
+                SELECT * FROM emergency_notifications
+                WHERE {where_sql}
+                ORDER BY id ASC
+                """,
+                tuple(params),
+            )
             rows = await cursor.fetchall()
             return [
                 EmergencyNotification(

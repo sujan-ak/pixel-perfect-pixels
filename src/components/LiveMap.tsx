@@ -33,7 +33,7 @@ const CAMERA_ZONES: CameraZone[] = [
 ];
 
 const HOSPITAL = {
-  name: "Osmania General Hospital",
+  name: "Sunshine Hospital, Gachibowli",
   type: "Trauma Care Level-1",
   pos: [17.3715, 78.4795] as [number, number],
 };
@@ -535,7 +535,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
         ambulanceMarker.bindPopup(`
           <div class="p-2 font-sans text-xs bg-bg-panel text-signal-verified border border-signal-verified rounded">
             <div class="font-bold">AMBULANCE UNIT #09 REACHED DESTINATION</div>
-            <div class="text-text-muted mt-1">Transferred to Osmania Emergency Trauma Ward.</div>
+            <div class="text-text-muted mt-1">Transferred to Sunshine Hospital Emergency Trauma Ward.</div>
             <div class="text-signal-data mt-1 font-mono text-[10px]">TIME SAVED: 4m 20s via Green Corridor</div>
           </div>
         `).openPopup();
@@ -677,7 +677,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
             <span className="text-line">|</span>
             <div className="flex items-center gap-1">
               <span className="h-2 w-2 rounded-full bg-[#22d3ee]"></span>
-              <span>Osmania Hospital</span>
+              <span>Sunshine Hospital</span>
             </div>
             <span className="text-line">|</span>
             <div className="flex items-center gap-1">
@@ -758,7 +758,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
             </div>
             <div className="flex items-center justify-between font-mono text-[11px] text-text-muted mt-1">
               <span>Target Hospital:</span>
-              <span className="text-signal-data font-semibold">Osmania Gen.</span>
+              <span className="text-signal-data font-semibold">Sunshine Hosp.</span>
             </div>
             <div className="flex items-center justify-between font-mono text-[11px] text-text-muted mt-1">
               <span>Estimated Time Saved:</span>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertOctagon, Pause, Play, ShieldAlert, Sliders, XCircle } from "lucide-react";
+import { AlertOctagon, Brain, Pause, Play, ShieldAlert, Sliders, XCircle } from "lucide-react";
 import type { Incident } from "@/lib/aurashield/types";
 
 interface OperatorControlBarProps {
@@ -10,9 +10,15 @@ interface OperatorControlBarProps {
   onChangeSensitivity?: (val: number) => void;
   onSensitivityChange?: (val: number) => void;
   incident?: Incident | null;
-  onOverrideReject?: (incidentId: string, reason?: string) => Promise<void> | void;
+  onOverrideReject?: (
+    incidentId: string,
+    reason?: string,
+    causeTag?: string,
+  ) => Promise<void> | void;
   canReject?: boolean;
   busy?: boolean;
+  memoryEnabled?: boolean;
+  onToggleMemory?: (enabled: boolean) => void;
 }
 
 export function OperatorControlBar({
@@ -26,23 +32,25 @@ export function OperatorControlBar({
   onOverrideReject,
   canReject,
   busy = false,
+  memoryEnabled = true,
+  onToggleMemory,
 }: OperatorControlBarProps) {
   const currentSensitivity = governorSensitivity ?? propSensitivity ?? 0.65;
   const handleSensitivityChange = onChangeSensitivity ?? onSensitivityChange ?? (() => {});
   const handleTogglePause = onTogglePause ? () => onTogglePause(!automationPaused) : () => {};
   const [rejectReason, setRejectReason] = useState("");
+  const [causeTag, setCauseTag] = useState<string>("glare");
   const [showRejectModal, setShowRejectModal] = useState(false);
 
   const canOverrideReject =
-    Boolean(incident) &&
-    incident?.state !== "REJECTED" &&
-    incident?.state !== "CLOSED";
+    Boolean(incident) && incident?.state !== "REJECTED" && incident?.state !== "CLOSED";
 
   const handleConfirmReject = () => {
     if (!incident) return;
     onOverrideReject?.(
       incident.id,
-      rejectReason.trim() || "Operator manual override: marked as false positive"
+      rejectReason.trim() || `Operator manual override: marked as false positive (${causeTag})`,
+      causeTag,
     );
     setShowRejectModal(false);
     setRejectReason("");
@@ -63,12 +71,28 @@ export function OperatorControlBar({
           </span>
         </div>
 
-        {automationPaused && (
-          <div className="flex items-center gap-2 rounded border border-signal-rejected/60 bg-signal-rejected/15 px-3 py-1 font-mono text-xs font-semibold text-signal-rejected animate-pulse">
-            <AlertOctagon className="h-4 w-4" />
-            <span>AUTOMATION PAUSED BY OPERATOR</span>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {onToggleMemory && (
+            <button
+              onClick={() => onToggleMemory(!memoryEnabled)}
+              className={`flex items-center gap-1.5 rounded border px-2.5 py-1 font-mono text-xs font-semibold transition-colors ${
+                memoryEnabled
+                  ? "border-purple-500/60 bg-purple-500/20 text-purple-300 hover:bg-purple-500/30"
+                  : "border-line bg-bg-void text-text-muted hover:border-text-primary hover:text-text-primary"
+              }`}
+            >
+              <Brain className="h-3.5 w-3.5" />
+              <span>{memoryEnabled ? "MEMORY: ACTIVE" : "MEMORY: OFF"}</span>
+            </button>
+          )}
+
+          {automationPaused && (
+            <div className="flex items-center gap-2 rounded border border-signal-rejected/60 bg-signal-rejected/15 px-3 py-1 font-mono text-xs font-semibold text-signal-rejected animate-pulse">
+              <AlertOctagon className="h-4 w-4" />
+              <span>AUTOMATION PAUSED BY OPERATOR</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Control Grid */}
@@ -83,11 +107,7 @@ export function OperatorControlBar({
                   : "bg-signal-verified/20 text-signal-verified"
               }`}
             >
-              {automationPaused ? (
-                <Pause className="h-4 w-4" />
-              ) : (
-                <Play className="h-4 w-4" />
-              )}
+              {automationPaused ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
             </div>
             <div>
               <div className="font-sans text-label font-medium text-text-primary">
@@ -122,9 +142,7 @@ export function OperatorControlBar({
             </label>
             <div className="font-mono text-sm font-semibold text-signal-data">
               {(currentSensitivity * 100).toFixed(0)}%{" "}
-              <span className="text-[11px] text-text-muted">
-                ({currentSensitivity.toFixed(2)})
-              </span>
+              <span className="text-[11px] text-text-muted">({currentSensitivity.toFixed(2)})</span>
             </div>
           </div>
 
@@ -187,11 +205,37 @@ export function OperatorControlBar({
             </div>
             <p className="mt-2 font-sans text-body text-text-muted">
               You are manually overriding the autonomous safety governor for incident{" "}
-              <span className="font-mono font-bold text-text-primary">
-                {incident?.id}
-              </span>
-              . This rejection will be permanently recorded in the cryptographic audit ledger.
+              <span className="font-mono font-bold text-text-primary">{incident?.id}</span>. This
+              rejection will be permanently recorded in the cryptographic audit ledger.
             </p>
+
+            <div className="mt-4">
+              <label className="font-sans text-label text-text-muted">
+                Root Cause Category (Retained to Hindsight Memory):
+              </label>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                {[
+                  { id: "glare", label: "Glare / Low Sun" },
+                  { id: "shadow", label: "Shadow / Occlusion" },
+                  { id: "vibration", label: "Camera Vibration" },
+                  { id: "mast_shake", label: "Mast Shake" },
+                  { id: "other", label: "Other / Sensor" },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setCauseTag(opt.id)}
+                    className={`rounded border px-2.5 py-1 font-mono text-xs transition-colors ${
+                      causeTag === opt.id
+                        ? "border-purple-400 bg-purple-500/25 text-purple-300 font-bold"
+                        : "border-line bg-bg-void text-text-muted hover:border-text-primary"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
 
             <div className="mt-4">
               <label

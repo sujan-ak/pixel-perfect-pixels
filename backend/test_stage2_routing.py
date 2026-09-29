@@ -242,6 +242,7 @@ def run_all_tests():
     mobile_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "AuraShield-master", "AuraShield-master", "mobile"))
     mobile_src = os.path.join(mobile_dir, "src")
     forbidden = ["AC1ad1d7", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"]
+    forbidden.append("SMS_GATEWAY_PASS")
     found_violations = []
     for root, _, files in os.walk(mobile_src):
         for f in files:
@@ -258,6 +259,11 @@ def run_all_tests():
     print("\n==================================================================")
     print(">>> ALL 16 AUDIT SPECIFICATION TESTS PASSED SUCCESSFULLY! <<<")
     print("==================================================================")
+
+
+def test_stage2_routing():
+    run_all_tests()
+
 
 if __name__ == "__main__":
     run_all_tests()

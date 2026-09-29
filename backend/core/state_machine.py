@@ -21,6 +21,8 @@ from core.notifications import (
     build_police_notification_message,
 )
 from database import DatabaseBackend, AuditEntry, Incident
+from memory import memory, compute_memory_prior
+from memory.schemas import Precedent, MemoryEvent
 
 logger = logging.getLogger("aurashield.core.state_machine")
 
@@ -81,9 +83,11 @@ class ConnectionManager:
     ) -> None:
         try:
             if latest_incident:
-                await websocket.send_json(
-                    {"type": "incident_update", "incident": latest_incident.model_dump()}
-                )
+                inc_dump = latest_incident.model_dump()
+                msg = {"type": "incident_update", "incident": inc_dump}
+                if latest_incident.memory:
+                    msg["memory"] = latest_incident.memory
+                await websocket.send_json(msg)
                 logger.debug("Replayed latest incident %s to new WS client", latest_incident.id)
 
             for entry in audit_entries:
@@ -118,6 +122,7 @@ class IncidentOrchestrator:
         self.field_updates: List[dict] = []
         self.acknowledgements: List[dict] = []
         self.last_approved_incident_id: Optional[str] = None
+        self.incident_memory: Dict[str, dict] = {}
 
     def device_heartbeat(self) -> None:
         self._device_seen_ms = int(time.time() * 1000)
@@ -141,7 +146,27 @@ class IncidentOrchestrator:
 
     def build_dispatch_plan(self, incident: Incident) -> dict:
         severity = "CRITICAL" if incident.corroborator_score > 0.7 else "HIGH"
-        hospital_id = self.twin.choose_hospital(severity)
+        default_hospital_id = self.twin.choose_hospital(severity)
+        hospital_id = default_hospital_id
+        memory_note = None
+
+        inc_hour = None
+        if incident.timestamp:
+            try:
+                if "T" in incident.timestamp:
+                    inc_hour = int(incident.timestamp.split("T")[1].split(":")[0])
+            except Exception:
+                pass
+        if inc_hour is None:
+            inc_hour = datetime.now(timezone.utc).hour
+
+        if memory.enabled and default_hospital_id == "H_ALPHA":
+            declines = memory.ledger.get_hospital_declines(hospital_id="H_ALPHA", hour=inc_hour)
+            if declines >= 3:
+                hospital_id = "H_BETA"
+                memory_note = f"Preferring H_BETA: H_ALPHA declined {declines} recent peak-hour dispatches"
+                logger.info("Hospital routing adjusted by memory: %s", memory_note)
+
         hospital = self.twin.hospitals.get(hospital_id)
         route_data = self.twin.plan_route(hospital_id, incident_node="N_CAM4")
 
@@ -160,13 +185,33 @@ class IncidentOrchestrator:
             "resources": ["Ambulance Unit #09", "Advanced Life Support"] if severity == "CRITICAL" else ["Basic Life Support"],
             "superseded_by": None,
             "superseded_reason": "",
+            "memory_note": memory_note,
         }
 
     def build_stage2_dispatch_plan(self, incident: Incident) -> dict:
         severity = "CRITICAL" if incident.corroborator_score > 0.7 else "HIGH"
         incident_node = "N_CAM4"
-        # Suitability first, then reachability and shortest graph path from N_CAM4
-        hospital_id = self.twin.choose_hospital(severity, src_node=incident_node)
+        default_hospital_id = self.twin.choose_hospital(severity, src_node=incident_node)
+        hospital_id = default_hospital_id
+        memory_note = None
+
+        inc_hour = None
+        if incident.timestamp:
+            try:
+                if "T" in incident.timestamp:
+                    inc_hour = int(incident.timestamp.split("T")[1].split(":")[0])
+            except Exception:
+                pass
+        if inc_hour is None:
+            inc_hour = datetime.now(timezone.utc).hour
+
+        if memory.enabled and default_hospital_id == "H_ALPHA":
+            declines = memory.ledger.get_hospital_declines(hospital_id="H_ALPHA", hour=inc_hour)
+            if declines >= 3:
+                hospital_id = "H_BETA"
+                memory_note = f"Preferring H_BETA: H_ALPHA declined {declines} recent peak-hour dispatches"
+                logger.info("Stage 2 hospital routing adjusted by memory: %s", memory_note)
+
         hospital = self.twin.hospitals.get(hospital_id)
         route_data = self.twin.plan_route(hospital_id, incident_node=incident_node, src_node=incident_node)
 
@@ -185,6 +230,7 @@ class IncidentOrchestrator:
             "resources": ["Ambulance Unit #09", "Advanced Life Support"] if severity == "CRITICAL" else ["Basic Life Support"],
             "superseded_by": None,
             "superseded_reason": "",
+            "memory_note": memory_note,
         }
 
     async def stream_agent_reasoning(self, agent: str, text: str) -> None:
@@ -262,6 +308,7 @@ class IncidentOrchestrator:
         steps = fixture["steps"]
         zone = fixture["zone"]
         media_file = fixture["media_file"]
+        cause_tags = fixture.get("cause_tags", [])
         prev_state: Optional[str] = None
 
         logger.info("Starting scenario pipeline for %s (%s, %s)", incident_id, scenario, zone)
@@ -269,24 +316,73 @@ class IncidentOrchestrator:
         fallback_corr = steps[-1]["corroborator_score"]
         fallback_skep = steps[-1]["skeptic_score"]
 
-        # Call get_real_scores ONCE at start of pipeline
-        real_corr, real_skep, confidence, degraded, corr_evidence, skep_evidence, provider_summary = (
-            await get_real_scores(
-                scenario=scenario,
-                fallback_corr=fallback_corr,
-                fallback_skep=fallback_skep,
+        # 1. Recall historical precedents and stats from memory
+        query_text = f"Incident in {zone}: {scenario} with tags {', '.join(cause_tags) if cause_tags else 'general'}"
+        recalled_precedents: List[Precedent] = []
+        memory_stats = None
+        source_label = "hindsight"
+
+        if memory.enabled:
+            recalled_precedents = await memory.recall(
+                query=query_text,
+                zone=zone,
+                cause_tags=cause_tags,
+                limit=5,
             )
+            memory_stats = await memory.ledger.stats(zone=zone, cause_tags=cause_tags)
+            if recalled_precedents:
+                source_label = recalled_precedents[0].source
+        else:
+            memory_stats = await memory.ledger.stats(zone=zone, cause_tags=cause_tags)
+
+        # 2. Call get_real_scores with recalled memory context
+        (
+            real_corr,
+            real_skep,
+            confidence,
+            degraded,
+            corr_evidence,
+            skep_evidence,
+            provider_summary,
+            precedents_used,
+            memory_used,
+        ) = await get_real_scores(
+            scenario=scenario,
+            fallback_corr=fallback_corr,
+            fallback_skep=fallback_skep,
+            memory_context=recalled_precedents,
+            memory_stats=memory_stats,
         )
         logger.info(
-            "Adversarial scoring for %s: corr=%.2f, skep=%.2f, conf=%.2f, degraded=%s, provider=%s",
+            "Adversarial scoring for %s: corr=%.2f, skep=%.2f, conf=%.2f, degraded=%s, provider=%s, memory_used=%s",
             scenario,
             real_corr,
             real_skep,
             confidence,
             degraded,
             provider_summary,
+            memory_used,
         )
 
+        # 3. Compute deterministic memory prior
+        raw_fused = compute_fused_score(real_corr, real_skep)
+        prior_res = compute_memory_prior(
+            stats=memory_stats,
+            raw_corr=real_corr,
+            raw_skep=real_skep,
+            memory_enabled=memory.enabled,
+        )
+
+        if prior_res.applied:
+            post_corr = prior_res.post_memory_scores.get("corr", real_corr)
+            post_skep = prior_res.post_memory_scores.get("skep", real_skep)
+            post_fused = prior_res.post_memory_scores.get("fused", raw_fused)
+        else:
+            post_corr = real_corr
+            post_skep = real_skep
+            post_fused = raw_fused
+
+        # Stream reasoning chunks
         corr_prov, skep_prov = provider_summary.split("+") if "+" in provider_summary else (provider_summary, provider_summary)
         await self.stream_agent_reasoning("CORROBORATOR", f"Initiating advocate analysis for {zone} (engine: {corr_prov})...")
         for ev in corr_evidence:
@@ -298,14 +394,90 @@ class IncidentOrchestrator:
             await asyncio.sleep(0.06)
             await self.stream_agent_reasoning("SKEPTIC", f"{ev} [Skeptic Score: {real_skep:.2f}]")
 
-        final_fused = compute_fused_score(real_corr, real_skep)
+        # Stream memory reasoning
+        if not memory.enabled:
+            await self.stream_agent_reasoning("MEMORY", "Memory subsystem is disabled (baseline dual-model evaluation).")
+        else:
+            n_prec = len(recalled_precedents)
+            await self.stream_agent_reasoning(
+                "MEMORY",
+                f"Recalled {n_prec} precedents from {source_label} for {zone} ({', '.join(cause_tags) if cause_tags else 'general'}).",
+            )
+            for p in recalled_precedents[:3]:
+                await asyncio.sleep(0.04)
+                await self.stream_agent_reasoning("MEMORY", f"• [{p.source.upper()}] {p.text}")
+            if prior_res.applied:
+                await asyncio.sleep(0.04)
+                await self.stream_agent_reasoning(
+                    "MEMORY",
+                    f"{prior_res.reason} (corr: {real_corr:.2f} -> {post_corr:.2f}, skep: {real_skep:.2f} -> {post_skep:.2f})",
+                )
+            elif n_prec > 0:
+                await asyncio.sleep(0.04)
+                await self.stream_agent_reasoning("MEMORY", f"Precedents reviewed; baseline prior retained ({prior_res.reason}).")
+
+        # Governor fusion evaluation with memory
+        final_fused = post_fused
         sensitivity_thresh = self.governor_sensitivity
-        is_verified_by_gov = (final_fused > 0.35 and confidence >= sensitivity_thresh)
+        pre_verified = (raw_fused > 0.35 and confidence >= sensitivity_thresh)
+        post_verified = (post_fused > 0.35 and confidence >= sensitivity_thresh)
+        is_verified_by_gov = post_verified
+        is_suppressed_by_memory = bool(
+            memory.enabled
+            and not post_verified
+            and (
+                (pre_verified and prior_res.applied)
+                or (prior_res.dominant == "false_alarm" and prior_res.dominant_count >= 3 and real_corr < 0.85)
+            )
+        )
+
+        if is_suppressed_by_memory:
+            suppress_line = f"Suppressed by memory ({prior_res.dominant_count} precedents)"
+            await self.stream_agent_reasoning(
+                "GOVERNOR",
+                f"Safety fusion: {suppress_line}. Prior adjusted fused score {raw_fused:+.2f} -> {post_fused:+.2f}.",
+            )
+            await self.stream_agent_reasoning("MEMORY", suppress_line)
+            gov_verdict = f"REJECTED AS FALSE ALARM ({suppress_line})"
+        elif is_verified_by_gov:
+            gov_verdict = "VERIFIED FOR DISPATCH"
+        else:
+            gov_verdict = "REJECTED AS FALSE ALARM"
+
         gov_summary = (
             f"Dual-model fusion complete: Fused {final_fused:+.2f} | Confidence {confidence:.2f} "
-            f"(Threshold: {sensitivity_thresh:.2f}) -> {'VERIFIED FOR DISPATCH' if is_verified_by_gov else 'REJECTED AS FALSE ALARM'}"
+            f"(Threshold: {sensitivity_thresh:.2f}) -> {gov_verdict}"
         )
         await self.stream_agent_reasoning("GOVERNOR", gov_summary)
+
+        # Construct comprehensive memory payload for websocket & incident
+        memory_payload = {
+            "enabled": memory.enabled,
+            "used": bool(prior_res.applied or len(recalled_precedents) > 0),
+            "source": source_label if (recalled_precedents and memory.enabled) else "none",
+            "precedents": [p.model_dump() for p in recalled_precedents],
+            "adjustment": {
+                "applied": prior_res.applied,
+                "corr_delta": prior_res.corr_delta,
+                "skep_delta": prior_res.skep_delta,
+                "delta": prior_res.delta,
+                "dominant": prior_res.dominant,
+                "dominant_count": prior_res.dominant_count,
+                "reason": prior_res.reason,
+            },
+            "pre_memory_scores": {
+                "corr": round(real_corr, 2),
+                "skep": round(real_skep, 2),
+                "fused": round(raw_fused, 2),
+            },
+            "post_memory_scores": {
+                "corr": round(post_corr, 2),
+                "skep": round(post_skep, 2),
+                "fused": round(post_fused, 2),
+            },
+            "suppressed_by_memory": is_suppressed_by_memory,
+        }
+        self.incident_memory[incident_id] = memory_payload
 
         for i, step in enumerate(steps):
             if i > 0:
@@ -337,19 +509,19 @@ class IncidentOrchestrator:
 
             # Interpolate towards real LLM scores
             if new_state == "OBSERVED":
-                corr = round(real_corr * 0.22, 2)
-                skep = round(real_skep * 0.40, 2)
+                corr = round(post_corr * 0.22, 2)
+                skep = round(post_skep * 0.40, 2)
             elif new_state == "CANDIDATE":
-                corr = round(real_corr * 0.71, 2)
-                skep = round(real_skep * 0.80, 2)
+                corr = round(post_corr * 0.71, 2)
+                skep = round(post_skep * 0.80, 2)
             else:
-                corr = real_corr
-                skep = real_skep
+                corr = post_corr
+                skep = post_skep
 
             fused = compute_fused_score(corr, skep)
 
             # Self-check assertion on final step
-            if i == len(steps) - 1:
+            if i == len(steps) - 1 or new_state == "REJECTED":
                 assert_terminal_state_matches(
                     fixture_state=new_state,
                     corroborator_score=corr,
@@ -359,15 +531,21 @@ class IncidentOrchestrator:
 
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            reasoning = await generate_reasoning(
-                state=new_state,
-                scenario=scenario,
-                zone=zone,
-                corroborator_score=corr,
-                skeptic_score=skep,
-                fused_score=fused,
-                fallback=step["reasoning"],
-            )
+            if is_suppressed_by_memory and new_state == "REJECTED":
+                reasoning = f"Suppressed by memory ({prior_res.dominant_count} precedents) — {prior_res.reason}"
+            else:
+                fallback_text = step["reasoning"]
+                if new_state == "REJECTED" and "VERIFIED" in fallback_text:
+                    fallback_text = f"REJECTED: fused score {fused:+.2f} below threshold (corr={corr:.2f}, skep={skep:.2f})"
+                reasoning = await generate_reasoning(
+                    state=new_state,
+                    scenario=scenario,
+                    zone=zone,
+                    corroborator_score=corr,
+                    skeptic_score=skep,
+                    fused_score=fused,
+                    fallback=fallback_text,
+                )
 
             if degraded and not reasoning.endswith("[FALLBACK SCORING]"):
                 reasoning = f"{reasoning} [FALLBACK SCORING]"
@@ -385,6 +563,7 @@ class IncidentOrchestrator:
                 media_file=media_file,
                 timestamp=now_iso,
                 degraded=degraded,
+                memory=memory_payload,
             )
 
             # Persist incident
@@ -396,6 +575,7 @@ class IncidentOrchestrator:
                     "type": "incident_update",
                     "incident": incident.model_dump(),
                     "degraded": degraded,
+                    "memory": memory_payload,
                 }
             )
 
@@ -431,6 +611,37 @@ class IncidentOrchestrator:
                 await self.connection_manager.broadcast_json(
                     {"type": "audit_entry", "entry": skep_audit.model_dump()}
                 )
+
+                # Memory audit entries
+                if not memory.enabled:
+                    mem_audit = await self.db.append_audit_entry(
+                        actor="memory_subsystem",
+                        action="MEMORY_OFF",
+                        timestamp=now_iso,
+                    )
+                    await self.connection_manager.broadcast_json(
+                        {"type": "audit_entry", "entry": mem_audit.model_dump()}
+                    )
+                else:
+                    recall_action = f"MEMORY_RECALLED: {len(recalled_precedents)} precedents (source={source_label})"
+                    recall_audit = await self.db.append_audit_entry(
+                        actor="memory_subsystem",
+                        action=recall_action,
+                        timestamp=now_iso,
+                    )
+                    await self.connection_manager.broadcast_json(
+                        {"type": "audit_entry", "entry": recall_audit.model_dump()}
+                    )
+                    if prior_res.applied:
+                        adj_action = f"MEMORY_ADJUSTMENT: {prior_res.reason}"
+                        adj_audit = await self.db.append_audit_entry(
+                            actor="memory_subsystem",
+                            action=adj_action,
+                            timestamp=now_iso,
+                        )
+                        await self.connection_manager.broadcast_json(
+                            {"type": "audit_entry", "entry": adj_audit.model_dump()}
+                        )
             else:
                 actor = "safety_governor"
                 action = f"STATE_TRANSITION: {prev_state} -> {new_state}"
@@ -454,8 +665,34 @@ class IncidentOrchestrator:
 
         logger.info("Completed scenario pipeline for %s (%s)", incident_id, scenario)
 
+        # PHASE 6: Retain terminal state event (INCIDENT_VERIFIED or INCIDENT_REJECTED)
+        term_kind = "INCIDENT_VERIFIED" if prev_state in ("VERIFIED", "RESPONSE_PROPOSED") else "INCIDENT_REJECTED"
+        term_event = MemoryEvent(
+            event_id=f"evt_{incident_id}_{term_kind.lower()}",
+            ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            kind=term_kind,
+            incident_id=incident_id,
+            zone=zone,
+            scenario=scenario,
+            cause_tags=cause_tags,
+            outcome=term_kind,
+            confidence=confidence,
+            corr_score=post_corr,
+            skeptic_score=post_skep,
+            fused_score=post_fused,
+            pre_memory_fused=round(raw_fused, 2),
+            post_memory_fused=round(post_fused, 2),
+            precedents_count=len(recalled_precedents),
+            notes=f"Pipeline reached {prev_state}. Verified={is_verified_by_gov}, SuppressedByMemory={is_suppressed_by_memory}",
+        )
+        asyncio.create_task(memory.retain(term_event))
+
+
     async def override_reject_incident(
-        self, incident_id: str, reason: str = "Operator manual override: marked as false positive"
+        self,
+        incident_id: str,
+        reason: str = "Operator manual override: marked as false positive",
+        cause_tag: Optional[str] = None,
     ) -> dict:
         incident = await self.db.get_incident_by_id(incident_id)
         if not incident:
@@ -468,6 +705,19 @@ class IncidentOrchestrator:
 
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # Derive cause tags for memory
+        tags = [cause_tag.lower()] if cause_tag else []
+        if not tags:
+            lower_r = reason.lower()
+            if "glare" in lower_r or "lens" in lower_r or "sun" in lower_r:
+                tags = ["glare"]
+            elif "shadow" in lower_r:
+                tags = ["shadow"]
+            elif "vibration" in lower_r or "wind" in lower_r or "shake" in lower_r:
+                tags = ["vibration"]
+            else:
+                tags = SCENARIO_FIXTURES.get(incident.scenario, {}).get("cause_tags", ["other"])
+
         # Emit audit entry
         action_str = f"OPERATOR_OVERRIDE_REJECT: {incident.id} — {reason}"
         audit_entry = await self.db.append_audit_entry(
@@ -478,6 +728,25 @@ class IncidentOrchestrator:
         await self.connection_manager.broadcast_json(
             {"type": "audit_entry", "entry": audit_entry.model_dump()}
         )
+
+        # PHASE 6: Retain OPERATOR_OVERRIDE in memory
+        ov_event = MemoryEvent(
+            event_id=f"evt_{incident.id}_override",
+            ts=now_iso,
+            kind="OPERATOR_OVERRIDE",
+            incident_id=incident.id,
+            zone=incident.zone,
+            scenario=incident.scenario,
+            cause_tags=tags,
+            operator_action="OVERRIDE_REJECT",
+            outcome="REJECTED_FALSE_ALARM",
+            confidence=incident.confidence,
+            corr_score=incident.corroborator_score,
+            skeptic_score=incident.skeptic_score,
+            fused_score=incident.fused_score,
+            notes=f"Operator override: marked false alarm due to {', '.join(tags)}. Detail: {reason}",
+        )
+        asyncio.create_task(memory.retain(ov_event))
 
         updated_incident = Incident(
             id=incident.id,
@@ -492,6 +761,7 @@ class IncidentOrchestrator:
             media_file=incident.media_file,
             timestamp=now_iso,
             degraded=incident.degraded,
+            memory=incident.memory or self.incident_memory.get(incident.id),
         )
         await self.db.save_incident(updated_incident)
         await self.connection_manager.broadcast_json(
@@ -545,6 +815,36 @@ class IncidentOrchestrator:
         self.acknowledgements = []
         self.ack_deadline_ms = int(time.time() * 1000) + 20000
 
+        # PHASE 6: Retain OPERATOR_APPROVED in memory
+        cause_tags = SCENARIO_FIXTURES.get(incident.scenario, {}).get("cause_tags", ["collision"])
+        app_event = MemoryEvent(
+            event_id=f"evt_{incident.id}_approved",
+            ts=now_iso,
+            kind="OPERATOR_APPROVED",
+            incident_id=incident.id,
+            zone=incident.zone,
+            scenario=incident.scenario,
+            cause_tags=cause_tags,
+            operator_action="APPROVE",
+            outcome="DISPATCH_APPROVED",
+            confidence=incident.confidence,
+            corr_score=incident.corroborator_score,
+            skeptic_score=incident.skeptic_score,
+            fused_score=incident.fused_score,
+            notes=f"Operator confirmed collision and approved emergency dispatch for {incident.id}.",
+        )
+        asyncio.create_task(memory.retain(app_event))
+
+        # Check hospital learning note in active plan
+        if self.active_plan.get("memory_note"):
+            hosp_audit = await self.db.append_audit_entry(
+                actor="memory_subsystem",
+                action=f"HOSPITAL_LEARNING: {self.active_plan['memory_note']}",
+                timestamp=now_iso,
+            )
+            await self.connection_manager.broadcast_json({"type": "audit_entry", "entry": hosp_audit.model_dump()})
+            await self.stream_agent_reasoning("MEMORY", f"Hospital routing advisory: {self.active_plan['memory_note']}")
+
         # Police Emergency Notification (idempotent, dynamic location and severity)
         location_label = f"{incident.zone} (NH-44 Gachibowli Junction), Hyderabad"
         await dispatch_police_notification(
@@ -554,12 +854,12 @@ class IncidentOrchestrator:
             connection_manager=self.connection_manager,
         )
 
-        police_recipient = get_police_recipient()
+        police_recipient = get_police_recipient() or "UNCONFIGURED"
         police_body = build_police_notification_message(incident, location_label)
         police_from = (
             os.getenv("TWILIO_FROM_NUMBER")
             or os.getenv("TWILIO_FROM")
-            or "+17372508034"
+            or "UNCONFIGURED"
         )
         sms_payload = {
             "to": police_recipient,
@@ -592,6 +892,7 @@ class IncidentOrchestrator:
 
         return {"status": "approved", "sms_payload": sms_payload}
 
+
     async def acknowledge_dispatch(
         self, incident_id: Optional[str] = None, source: str = "responder_iphone", channel: str = "responder_device"
     ) -> dict:
@@ -611,6 +912,12 @@ class IncidentOrchestrator:
             "channel": channel,
             "at_ms": int(time.time() * 1000),
         })
+
+        # Calculate ack latency
+        ack_latency_ms = 8500
+        if self.ack_deadline_ms:
+            time_left_ms = self.ack_deadline_ms - int(time.time() * 1000)
+            ack_latency_ms = max(500, 20000 - max(0, time_left_ms))
         self.ack_deadline_ms = None
 
         await self.db.save_incident(inc)
@@ -627,14 +934,34 @@ class IncidentOrchestrator:
         )
         await self.stream_agent_reasoning(
             "DISPATCH",
-            f"Ambulance Unit responder acknowledged dispatch on mobile device ({source})."
+            f"Ambulance Unit responder acknowledged dispatch on mobile device ({source}) [latency: {ack_latency_ms}ms]."
         )
+
+        # PHASE 6: Retain DISPATCH_ACKED
+        hosp_id = self.active_plan.get("hospital_id") if self.active_plan else "H_ALPHA"
+        ack_event = MemoryEvent(
+            event_id=f"evt_{inc.id}_ack",
+            ts=now_iso,
+            kind="DISPATCH_ACKED",
+            incident_id=inc.id,
+            zone=inc.zone,
+            scenario=inc.scenario,
+            cause_tags=SCENARIO_FIXTURES.get(inc.scenario, {}).get("cause_tags", []),
+            operator_action="ACK_DISPATCH",
+            outcome="DISPATCH_ACCEPTED",
+            hospital_id=hosp_id,
+            ack_latency_ms=ack_latency_ms,
+            notes=f"Emergency dispatch acknowledged by {source} via {channel} with {ack_latency_ms}ms latency.",
+        )
+        asyncio.create_task(memory.retain(ack_event))
+
         return await self.build_mobile_state()
 
     async def decline_dispatch(
         self, incident_id: Optional[str] = None, source: str = "responder_iphone"
     ) -> dict:
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        inc = await self.db.get_incident_by_id(incident_id) if incident_id else await self.db.get_latest_incident()
         audit_entry = await self.db.append_audit_entry(
             actor="responder_device",
             action=f"RESPONDER_DECLINED: dispatch declined by {source}",
@@ -647,6 +974,24 @@ class IncidentOrchestrator:
             "DISPATCH",
             f"Responder {source} declined dispatch. Backup reroute initiated."
         )
+
+        # PHASE 6: Retain DISPATCH_DECLINED
+        hosp_id = self.active_plan.get("hospital_id") if self.active_plan else "H_ALPHA"
+        dec_event = MemoryEvent(
+            event_id=f"evt_{inc.id if inc else 'inc'}_{int(time.time())}_declined",
+            ts=now_iso,
+            kind="DISPATCH_DECLINED",
+            incident_id=inc.id if inc else "unknown",
+            zone=inc.zone if inc else "Zone 04",
+            scenario=inc.scenario if inc else "crash_zone04",
+            cause_tags=SCENARIO_FIXTURES.get(inc.scenario, {}).get("cause_tags", []) if inc else [],
+            operator_action="DECLINE_DISPATCH",
+            outcome="DISPATCH_DECLINED",
+            hospital_id=hosp_id,
+            notes=f"Dispatch to hospital {hosp_id} was declined by {source}.",
+        )
+        asyncio.create_task(memory.retain(dec_event))
+
         return await self.build_mobile_state()
 
     async def update_field_status(
@@ -678,6 +1023,17 @@ class IncidentOrchestrator:
             self.active_plan = self.build_stage2_dispatch_plan(inc)
             logger.info("Stage 2 pickup-to-hospital route plan generated for %s (dest: %s, eta: %ds)",
                         inc.id, self.active_plan["hospital_id"], self.active_plan["eta_seconds"])
+
+            # Check hospital learning advisory
+            if self.active_plan.get("memory_note"):
+                hosp_audit = await self.db.append_audit_entry(
+                    actor="memory_subsystem",
+                    action=f"HOSPITAL_LEARNING: {self.active_plan['memory_note']}",
+                    timestamp=now_iso,
+                )
+                await self.connection_manager.broadcast_json({"type": "audit_entry", "entry": hosp_audit.model_dump()})
+                await self.stream_agent_reasoning("MEMORY", f"Stage 2 routing advisory: {self.active_plan['memory_note']}")
+
             location_label = f"{inc.zone} (NH-44 Gachibowli Junction), Hyderabad"
             await dispatch_hospital_notification(
                 db=self.db,
@@ -686,6 +1042,25 @@ class IncidentOrchestrator:
                 location_label=location_label,
                 connection_manager=self.connection_manager,
             )
+
+        # PHASE 6: Retain INCIDENT_CLOSED when reaching HANDED_OVER or CLOSED
+        if status in ("HANDED_OVER", "CLOSED"):
+            hosp_id = self.active_plan.get("hospital_id") if self.active_plan else "H_ALPHA"
+            close_event = MemoryEvent(
+                event_id=f"evt_{inc.id}_closed",
+                ts=now_iso,
+                kind="INCIDENT_CLOSED",
+                incident_id=inc.id,
+                zone=inc.zone,
+                scenario=inc.scenario,
+                cause_tags=SCENARIO_FIXTURES.get(inc.scenario, {}).get("cause_tags", []),
+                operator_action="FIELD_COMPLETION",
+                outcome="PATIENT_DELIVERED_CLOSED",
+                hospital_id=hosp_id,
+                confidence=inc.confidence,
+                notes=f"Patient successfully transferred to emergency care at {hosp_id}. Incident {inc.id} completed.",
+            )
+            asyncio.create_task(memory.retain(close_event))
 
         await self.db.save_incident(inc)
         await self.connection_manager.broadcast_json(
@@ -720,6 +1095,24 @@ class IncidentOrchestrator:
                 await self.connection_manager.broadcast_json(
                     {"type": "audit_entry", "entry": audit_entry.model_dump()}
                 )
+
+                # PHASE 6: Retain ACK_TIMEOUT
+                hosp_id = self.active_plan.get("hospital_id") if self.active_plan else "H_ALPHA"
+                to_event = MemoryEvent(
+                    event_id=f"evt_{inc.id}_{int(time.time())}_timeout",
+                    ts=now_iso,
+                    kind="ACK_TIMEOUT",
+                    incident_id=inc.id,
+                    zone=inc.zone,
+                    scenario=inc.scenario,
+                    cause_tags=SCENARIO_FIXTURES.get(inc.scenario, {}).get("cause_tags", []),
+                    operator_action="TIMEOUT_EXPIRED",
+                    outcome="ACK_TIMEOUT",
+                    hospital_id=hosp_id,
+                    notes=f"Mobile responder ACK deadline expired (20s) for {inc.id} at hospital {hosp_id}.",
+                )
+                asyncio.create_task(memory.retain(to_event))
+
         return await self.build_mobile_state()
 
     async def build_mobile_state(self) -> dict:
@@ -737,8 +1130,8 @@ class IncidentOrchestrator:
             # Derive authoritative incident coordinates from CityTwin node N_CAM4
             nodes_list = self.twin.snapshot()["nodes"]
             cam_node = next((n for n in nodes_list if n["id"] == "N_CAM4"), None)
-            inc_lat = cam_node["lat"] if cam_node else 17.4400
-            inc_lon = cam_node["lon"] if cam_node else 78.3480
+            inc_lat = cam_node["lat"] if cam_node else 17.4401
+            inc_lon = cam_node["lon"] if cam_node else 78.3489
 
             mobile_inc = {
                 "incident_id": inc.id,
@@ -785,12 +1178,17 @@ class IncidentOrchestrator:
                 for n in notifs
             ]
 
+        hosp_name = (
+            plan.get("hospital_name")
+            if (inc and plan)
+            else "Sunshine Hospital, Gachibowli"
+        )
         summary_en = (
-            f"Collision alert at {inc.zone if inc else 'Zone 04'}. Destination Osmania General Hospital. "
+            f"Collision alert at {inc.zone if inc else 'Zone 04'}. Destination {hosp_name}. "
             "Priority green corridor requested. Slide to acknowledge, or decline if unavailable."
         )
         summary_te = (
-            f"{inc.zone if inc else 'Zone 04'} వద్ద ప్రమాద హెచ్చరిక. గమ్యస్థానం ఉస్మానియా జనరల్ హాస్పిటల్. "
+            f"{inc.zone if inc else 'Zone 04'} వద్ద ప్రమాద హెచ్చరిక. గమ్యస్థానం {hosp_name}. "
             "గ్రీన్ కారిడార్ యాక్టివేట్ చేయబడింది. దయచేసి ధృవీకరించండి."
         )
 
@@ -816,6 +1214,7 @@ class IncidentOrchestrator:
             "scenarios": {
                 "crash_zone04": {"name": "MJ Market Arterial Crash (Zone 04)", "clip": "scenario_a_collision.mp4"},
                 "false_alarm": {"name": "False Alarm - Shadow & Reflection", "clip": "scenario_b_false_alarm.mp4"},
+                "glare_ambiguous": {"name": "Low-Sun Optical Glare (Zone 02)", "clip": "traffic_false_alarm.mp4"},
             },
             "incident": mobile_inc,
             "twin": self.twin.snapshot(),

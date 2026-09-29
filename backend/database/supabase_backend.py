@@ -436,31 +436,32 @@ class SupabaseBackend(DatabaseBackend):
         return notif
 
     async def get_notifications_for_incident(
-        self, incident_id: str, notification_type: Optional[str] = None
+        self, incident_id: str, notification_type: Optional[str] = None, channel: Optional[str] = None
     ) -> List[EmergencyNotification]:
         if not self.pool:
             return []
         try:
             async with self.pool.acquire() as conn:
+                conditions = ["incident_id = $1"]
+                params = [incident_id]
+                idx = 2
                 if notification_type:
-                    rows = await conn.fetch(
-                        """
-                        SELECT * FROM emergency_notifications
-                        WHERE incident_id = $1 AND notification_type = $2
-                        ORDER BY id ASC;
-                        """,
-                        incident_id,
-                        notification_type,
-                    )
-                else:
-                    rows = await conn.fetch(
-                        """
-                        SELECT * FROM emergency_notifications
-                        WHERE incident_id = $1
-                        ORDER BY id ASC;
-                        """,
-                        incident_id,
-                    )
+                    conditions.append(f"notification_type = ${idx}")
+                    params.append(notification_type)
+                    idx += 1
+                if channel:
+                    conditions.append(f"channel = ${idx}")
+                    params.append(channel.upper())
+                    idx += 1
+                where_sql = " AND ".join(conditions)
+                rows = await conn.fetch(
+                    f"""
+                    SELECT * FROM emergency_notifications
+                    WHERE {where_sql}
+                    ORDER BY id ASC;
+                    """,
+                    *params,
+                )
                 return [
                     EmergencyNotification(
                         id=row["id"],

@@ -56,5 +56,8 @@ def run_tests():
         print(">>> ALL E2E INTEGRATION TESTS PASSED CLEANLY! <<<")
         print("==============================================")
 
+def test_e2e():
+    run_tests()
+
 if __name__ == "__main__":
     run_tests()

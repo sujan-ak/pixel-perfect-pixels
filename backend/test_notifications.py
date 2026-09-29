@@ -102,12 +102,17 @@ async def run_all_tests():
     assert res["status"] == "approved"
     assert "sms_payload" in res
 
-    police_notifs = await db.get_notifications_for_incident(inc.id, "POLICE")
-    assert len(police_notifs) == 1, f"Expected 1 police notification, got {len(police_notifs)}"
-    assert police_notifs[0].status == "SENT"
-    assert police_notifs[0].trigger_event == "INCIDENT_APPROVED"
-    assert police_notifs[0].provider_id is not None
-    print(f" TEST 1 PASSED: Police notification created on approval (SID: {police_notifs[0].provider_id})")
+    police_sms_notifs = await db.get_notifications_for_incident(inc.id, "POLICE", channel="SMS")
+    police_call_notifs = await db.get_notifications_for_incident(inc.id, "POLICE", channel="VOICE")
+    assert len(police_sms_notifs) == 1, f"Expected 1 police SMS notification, got {len(police_sms_notifs)}"
+    assert len(police_call_notifs) == 1, f"Expected 1 police CALL notification, got {len(police_call_notifs)}"
+    assert police_sms_notifs[0].status == "SENT"
+    assert police_call_notifs[0].status == "SENT"
+    assert police_sms_notifs[0].trigger_event == "INCIDENT_APPROVED"
+    assert police_call_notifs[0].trigger_event == "INCIDENT_APPROVED"
+    assert police_sms_notifs[0].provider_id is not None
+    assert police_call_notifs[0].provider_id is not None
+    print(f" TEST 1 PASSED: Police SMS (SID: {police_sms_notifs[0].provider_id}) and CALL (SID: {police_call_notifs[0].provider_id}) created on approval")
 
     # -------------------------------------------------------------
     # TEST 2: Police notification idempotency
@@ -117,19 +122,23 @@ async def run_all_tests():
     # Attempt repeated dispatch_police_notification
     second_police_res = await dispatch_police_notification(db, inc, location_label="Test Loc")
     assert second_police_res is None, "Repeated police notification was not blocked by idempotency guard!"
-    assert len(dispatched_mock) == prev_count, "Twilio mock was called again on duplicate approval!"
-    print(" TEST 2 PASSED: Repeated approval dispatch blocked (Idempotency verified)")
+    assert len(dispatched_mock) == prev_count, "Mock was called again on duplicate approval!"
+    print(" TEST 2 PASSED: Repeated approval dispatch blocked (Idempotency verified for SMS + CALL)")
 
     # -------------------------------------------------------------
     # TEST 3: Police notification dynamic information
     # -------------------------------------------------------------
     print("\n--- TEST 3: Dynamic Police Notification Content ---")
-    body = police_notifs[0].message_body
+    body = police_sms_notifs[0].message_body
     assert inc.id in body, f"Incident ID '{inc.id}' missing in body: {body}"
     assert "Severity:" in body, f"Severity missing in body: {body}"
     assert "Zone 04" in body or "Hyderabad" in body, f"Dynamic location missing: {body}"
     assert "Ambulance response initiated" in body
-    print(" TEST 3 PASSED: Dynamic incident location, severity, and ID present")
+
+    call_body = police_call_notifs[0].message_body
+    assert "demo alert" in call_body.lower()
+    assert inc.id in call_body
+    print(" TEST 3 PASSED: Dynamic incident location, severity, and ID present in both SMS and CALL")
 
     # Responder acknowledges and moves EN_ROUTE -> ON_SCENE
     await orch.acknowledge_dispatch(inc.id, source="responder_iphone")
@@ -150,11 +159,15 @@ async def run_all_tests():
     print("\n--- TEST 5: PATIENT_LOADED Triggers Hospital Notification ---")
     dispatched_mock.clear()
     await orch.update_field_status(inc.id, source="responder_iphone", status="PATIENT_LOADED")
-    hosp_notifs = await db.get_notifications_for_incident(inc.id, "HOSPITAL")
-    assert len(hosp_notifs) == 1, f"Expected 1 hospital notification, got {len(hosp_notifs)}"
-    assert hosp_notifs[0].status == "SENT"
-    assert hosp_notifs[0].trigger_event == "PATIENT_LOADED"
-    print(f" TEST 5 PASSED: Hospital notification triggered by PATIENT_LOADED (SID: {hosp_notifs[0].provider_id})")
+    hosp_sms_notifs = await db.get_notifications_for_incident(inc.id, "HOSPITAL", channel="SMS")
+    hosp_call_notifs = await db.get_notifications_for_incident(inc.id, "HOSPITAL", channel="VOICE")
+    assert len(hosp_sms_notifs) == 1, f"Expected 1 hospital SMS notification, got {len(hosp_sms_notifs)}"
+    assert len(hosp_call_notifs) == 1, f"Expected 1 hospital CALL notification, got {len(hosp_call_notifs)}"
+    assert hosp_sms_notifs[0].status == "SENT"
+    assert hosp_call_notifs[0].status == "SENT"
+    assert hosp_sms_notifs[0].trigger_event == "PATIENT_LOADED"
+    assert hosp_call_notifs[0].trigger_event == "PATIENT_LOADED"
+    print(f" TEST 5 PASSED: Hospital SMS (SID: {hosp_sms_notifs[0].provider_id}) and CALL (SID: {hosp_call_notifs[0].provider_id}) triggered by PATIENT_LOADED")
 
     # -------------------------------------------------------------
     # TEST 6: Hospital notification uses Stage 2 selected hospital
@@ -163,10 +176,13 @@ async def run_all_tests():
     active_plan = orch.active_plan
     assert active_plan is not None
     selected_hosp_name = active_plan["hospital_name"]
-    assert selected_hosp_name in hosp_notifs[0].message_body, (
-        f"Selected hospital '{selected_hosp_name}' not found in notification: {hosp_notifs[0].message_body}"
+    assert selected_hosp_name in hosp_sms_notifs[0].message_body, (
+        f"Selected hospital '{selected_hosp_name}' not found in SMS notification: {hosp_sms_notifs[0].message_body}"
     )
-    print(f" TEST 6 PASSED: Correct Stage 2 hospital matched ({selected_hosp_name})")
+    assert selected_hosp_name in hosp_call_notifs[0].message_body, (
+        f"Selected hospital '{selected_hosp_name}' not found in CALL notification: {hosp_call_notifs[0].message_body}"
+    )
+    print(f" TEST 6 PASSED: Correct Stage 2 hospital matched in SMS and CALL ({selected_hosp_name})")
 
     # -------------------------------------------------------------
     # TEST 7: Hospital notification uses Stage 2 ETA
@@ -174,17 +190,21 @@ async def run_all_tests():
     print("\n--- TEST 7: Hospital Notification Uses Stage 2 ETA ---")
     eta_sec = active_plan["eta_seconds"]
     expected_eta_substr = f"{eta_sec}s"
-    assert expected_eta_substr in hosp_notifs[0].message_body, (
-        f"Stage 2 ETA {eta_sec}s missing in notification: {hosp_notifs[0].message_body}"
+    assert expected_eta_substr in hosp_sms_notifs[0].message_body, (
+        f"Stage 2 ETA {eta_sec}s missing in SMS notification: {hosp_sms_notifs[0].message_body}"
     )
-    print(f" TEST 7 PASSED: Stage 2 ETA properly included ({active_plan['eta_seconds']}s -> {format_eta(eta_sec)})")
+    assert format_eta(eta_sec) in hosp_call_notifs[0].message_body, (
+        f"Stage 2 ETA missing in CALL notification: {hosp_call_notifs[0].message_body}"
+    )
+    print(f" TEST 7 PASSED: Stage 2 ETA properly included in SMS and CALL ({active_plan['eta_seconds']}s -> {format_eta(eta_sec)})")
 
     # -------------------------------------------------------------
     # TEST 8: Hospital notification uses dynamic incident location
     # -------------------------------------------------------------
     print("\n--- TEST 8: Hospital Notification Uses Dynamic Incident Location ---")
-    assert inc.zone in hosp_notifs[0].message_body
-    print(f" TEST 8 PASSED: Dynamic incident location ({inc.zone}) verified")
+    assert inc.zone in hosp_sms_notifs[0].message_body
+    assert inc.zone in hosp_call_notifs[0].message_body
+    print(f" TEST 8 PASSED: Dynamic incident location ({inc.zone}) verified in SMS and CALL")
 
     # -------------------------------------------------------------
     # TEST 9: Hospital notification idempotency on repeated PATIENT_LOADED
@@ -192,10 +212,12 @@ async def run_all_tests():
     print("\n--- TEST 9: Hospital Notification Idempotency ---")
     mock_len_before = len(dispatched_mock)
     await orch.update_field_status(inc.id, source="responder_iphone", status="PATIENT_LOADED")
-    hosp_notifs_after = await db.get_notifications_for_incident(inc.id, "HOSPITAL")
-    assert len(hosp_notifs_after) == 1, "Duplicate hospital notification created on repeat PATIENT_LOADED!"
-    assert len(dispatched_mock) == mock_len_before, "Twilio called on duplicate PATIENT_LOADED!"
-    print(" TEST 9 PASSED: Idempotency prevents duplicate hospital notification on re-trigger")
+    hosp_sms_after = await db.get_notifications_for_incident(inc.id, "HOSPITAL", channel="SMS")
+    hosp_call_after = await db.get_notifications_for_incident(inc.id, "HOSPITAL", channel="VOICE")
+    assert len(hosp_sms_after) == 1, "Duplicate hospital SMS notification created on repeat PATIENT_LOADED!"
+    assert len(hosp_call_after) == 1, "Duplicate hospital CALL notification created on repeat PATIENT_LOADED!"
+    assert len(dispatched_mock) == mock_len_before, "Mock called on duplicate PATIENT_LOADED!"
+    print(" TEST 9 PASSED: Idempotency prevents duplicate hospital SMS and CALL on re-trigger")
 
     # -------------------------------------------------------------
     # TEST 10: Hospital Fallback (H_ALPHA full -> H_BETA selected)
@@ -227,10 +249,13 @@ async def run_all_tests():
 
     plan2 = orch.active_plan
     assert plan2["hospital_id"] == "H_BETA", f"Expected fallback H_BETA, got {plan2['hospital_id']}"
-    hosp2_notifs = await db.get_notifications_for_incident(inc2.id, "HOSPITAL")
-    assert len(hosp2_notifs) == 1
-    assert plan2["hospital_name"] in hosp2_notifs[0].message_body
-    print(f" TEST 10 PASSED: Fallback hospital H_BETA correctly routed and notified")
+    hosp2_sms_notifs = await db.get_notifications_for_incident(inc2.id, "HOSPITAL", channel="SMS")
+    hosp2_call_notifs = await db.get_notifications_for_incident(inc2.id, "HOSPITAL", channel="VOICE")
+    assert len(hosp2_sms_notifs) == 1
+    assert len(hosp2_call_notifs) == 1
+    assert plan2["hospital_name"] in hosp2_sms_notifs[0].message_body
+    assert plan2["hospital_name"] in hosp2_call_notifs[0].message_body
+    print(f" TEST 10 PASSED: Fallback hospital H_BETA correctly routed and notified via SMS and CALL")
 
     # Reset twin
     orch.twin.reset()
@@ -283,11 +308,11 @@ async def run_all_tests():
     appr_res = await orch.approve_incident(inc3.id)
     assert appr_res["status"] == "approved", "Incident approval failed due to Twilio error!"
 
-    # Police notification should be recorded as FAILED
+    # Police notification should be recorded as FAILED for both SMS and CALL
     police_failed = await db.get_notifications_for_incident(inc3.id, "POLICE")
-    assert len(police_failed) == 1
-    assert police_failed[0].status == "FAILED"
-    assert "Mock Error 20003" in police_failed[0].error_message
+    assert len(police_failed) == 2, f"Expected 2 police failure records (SMS + CALL), got {len(police_failed)}"
+    assert all(n.status == "FAILED" for n in police_failed)
+    assert all("Mock Error 20003" in (n.error_message or "") for n in police_failed)
 
     # Incident workflow proceeds normally
     await orch.acknowledge_dispatch(inc3.id)
@@ -295,11 +320,11 @@ async def run_all_tests():
     await orch.update_field_status(inc3.id, status="ON_SCENE")
     state_after_loaded = await orch.update_field_status(inc3.id, status="PATIENT_LOADED")
 
-    # Hospital notification should be recorded as FAILED, but Stage 2 route remains intact
+    # Hospital notification should be recorded as FAILED for both SMS and CALL, but Stage 2 route remains intact
     hosp_failed = await db.get_notifications_for_incident(inc3.id, "HOSPITAL")
-    assert len(hosp_failed) == 1
-    assert hosp_failed[0].status == "FAILED"
-    assert "Mock Error 20003" in hosp_failed[0].error_message
+    assert len(hosp_failed) == 2, f"Expected 2 hospital failure records (SMS + CALL), got {len(hosp_failed)}"
+    assert all(n.status == "FAILED" for n in hosp_failed)
+    assert all("Mock Error 20003" in (n.error_message or "") for n in hosp_failed)
 
     # Verify Stage 2 route exists and is valid
     assert state_after_loaded["incident"]["active_plan"] is not None
@@ -317,7 +342,7 @@ async def run_all_tests():
     if not mobile_dir.exists():
         mobile_dir = Path("c:/Users/sujan/Downloads/pixel-perfect-pixels-main/AuraShield-master/AuraShield-master/mobile")
 
-    forbidden_terms = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "twilio.rest", "AC1ad1d7"]
+    forbidden_terms = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "twilio.rest", "AC1ad1d7", "SMS_GATEWAY_PASS"]
     found = []
     mobile_src = mobile_dir / "src"
     if mobile_src.exists():
@@ -343,6 +368,10 @@ async def run_all_tests():
     print("\n" + "=" * 70)
     print(">>> ALL 14 NOTIFICATION UNIT & INTEGRATION TESTS PASSED! <<<")
     print("=" * 70)
+
+
+def test_notifications():
+    asyncio.run(run_all_tests())
 
 
 if __name__ == "__main__":
