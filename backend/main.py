@@ -158,6 +158,22 @@ async def trigger_incident(req: TriggerRequest) -> TriggerResponse:
         )
 
 
+@app.get(
+    "/incidents/{incident_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=Incident,
+    summary="Get incident state and details by ID",
+)
+async def get_incident(incident_id: str) -> Incident:
+    inc = await db.get_incident_by_id(incident_id)
+    if not inc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found",
+        )
+    return inc
+
+
 @app.post(
     "/incidents/{incident_id}/approve",
     status_code=status.HTTP_200_OK,
