@@ -486,6 +486,7 @@ SCENARIO_FIXTURES: Dict[str, Dict[str, Any]] = {
     "crash_zone04": {
         "zone": "Zone 04",
         "media_file": "traffic_crash_zone04.mp4",
+        "cause_tags": ["collision"],
         "steps": [
             {
                 "state": "OBSERVED",
@@ -523,6 +524,7 @@ SCENARIO_FIXTURES: Dict[str, Dict[str, Any]] = {
     "false_alarm": {
         "zone": "Zone 02",
         "media_file": "traffic_false_alarm.mp4",
+        "cause_tags": ["vibration", "mast_shake"],
         "steps": [
             {
                 "state": "OBSERVED",

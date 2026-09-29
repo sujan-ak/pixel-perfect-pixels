@@ -35,6 +35,7 @@ class Incident(BaseModel):
     responder_id: Optional[str] = None
     ack_channel: Optional[str] = None
     ack_time: Optional[str] = None
+    memory: Optional[Dict[str, Any]] = None
 
 
 class EmergencyNotification(BaseModel):

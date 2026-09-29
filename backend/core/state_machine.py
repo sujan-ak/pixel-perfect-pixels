@@ -21,6 +21,8 @@ from core.notifications import (
     build_police_notification_message,
 )
 from database import DatabaseBackend, AuditEntry, Incident
+from memory import memory, compute_memory_prior
+from memory.schemas import Precedent
 
 logger = logging.getLogger("aurashield.core.state_machine")
 
@@ -81,9 +83,11 @@ class ConnectionManager:
     ) -> None:
         try:
             if latest_incident:
-                await websocket.send_json(
-                    {"type": "incident_update", "incident": latest_incident.model_dump()}
-                )
+                inc_dump = latest_incident.model_dump()
+                msg = {"type": "incident_update", "incident": inc_dump}
+                if latest_incident.memory:
+                    msg["memory"] = latest_incident.memory
+                await websocket.send_json(msg)
                 logger.debug("Replayed latest incident %s to new WS client", latest_incident.id)
 
             for entry in audit_entries:
@@ -118,6 +122,7 @@ class IncidentOrchestrator:
         self.field_updates: List[dict] = []
         self.acknowledgements: List[dict] = []
         self.last_approved_incident_id: Optional[str] = None
+        self.incident_memory: Dict[str, dict] = {}
 
     def device_heartbeat(self) -> None:
         self._device_seen_ms = int(time.time() * 1000)
@@ -262,6 +267,7 @@ class IncidentOrchestrator:
         steps = fixture["steps"]
         zone = fixture["zone"]
         media_file = fixture["media_file"]
+        cause_tags = fixture.get("cause_tags", [])
         prev_state: Optional[str] = None
 
         logger.info("Starting scenario pipeline for %s (%s, %s)", incident_id, scenario, zone)
@@ -269,24 +275,73 @@ class IncidentOrchestrator:
         fallback_corr = steps[-1]["corroborator_score"]
         fallback_skep = steps[-1]["skeptic_score"]
 
-        # Call get_real_scores ONCE at start of pipeline
-        real_corr, real_skep, confidence, degraded, corr_evidence, skep_evidence, provider_summary = (
-            await get_real_scores(
-                scenario=scenario,
-                fallback_corr=fallback_corr,
-                fallback_skep=fallback_skep,
+        # 1. Recall historical precedents and stats from memory
+        query_text = f"Incident in {zone}: {scenario} with tags {', '.join(cause_tags) if cause_tags else 'general'}"
+        recalled_precedents: List[Precedent] = []
+        memory_stats = None
+        source_label = "hindsight"
+
+        if memory.enabled:
+            recalled_precedents = await memory.recall(
+                query=query_text,
+                zone=zone,
+                cause_tags=cause_tags,
+                limit=5,
             )
+            memory_stats = await memory.ledger.stats(zone=zone, cause_tags=cause_tags)
+            if recalled_precedents:
+                source_label = recalled_precedents[0].source
+        else:
+            memory_stats = await memory.ledger.stats(zone=zone, cause_tags=cause_tags)
+
+        # 2. Call get_real_scores with recalled memory context
+        (
+            real_corr,
+            real_skep,
+            confidence,
+            degraded,
+            corr_evidence,
+            skep_evidence,
+            provider_summary,
+            precedents_used,
+            memory_used,
+        ) = await get_real_scores(
+            scenario=scenario,
+            fallback_corr=fallback_corr,
+            fallback_skep=fallback_skep,
+            memory_context=recalled_precedents,
+            memory_stats=memory_stats,
         )
         logger.info(
-            "Adversarial scoring for %s: corr=%.2f, skep=%.2f, conf=%.2f, degraded=%s, provider=%s",
+            "Adversarial scoring for %s: corr=%.2f, skep=%.2f, conf=%.2f, degraded=%s, provider=%s, memory_used=%s",
             scenario,
             real_corr,
             real_skep,
             confidence,
             degraded,
             provider_summary,
+            memory_used,
         )
 
+        # 3. Compute deterministic memory prior
+        raw_fused = compute_fused_score(real_corr, real_skep)
+        prior_res = compute_memory_prior(
+            stats=memory_stats,
+            raw_corr=real_corr,
+            raw_skep=real_skep,
+            memory_enabled=memory.enabled,
+        )
+
+        if prior_res.applied:
+            post_corr = prior_res.post_memory_scores.get("corr", real_corr)
+            post_skep = prior_res.post_memory_scores.get("skep", real_skep)
+            post_fused = prior_res.post_memory_scores.get("fused", raw_fused)
+        else:
+            post_corr = real_corr
+            post_skep = real_skep
+            post_fused = raw_fused
+
+        # Stream reasoning chunks
         corr_prov, skep_prov = provider_summary.split("+") if "+" in provider_summary else (provider_summary, provider_summary)
         await self.stream_agent_reasoning("CORROBORATOR", f"Initiating advocate analysis for {zone} (engine: {corr_prov})...")
         for ev in corr_evidence:
@@ -298,14 +353,83 @@ class IncidentOrchestrator:
             await asyncio.sleep(0.06)
             await self.stream_agent_reasoning("SKEPTIC", f"{ev} [Skeptic Score: {real_skep:.2f}]")
 
-        final_fused = compute_fused_score(real_corr, real_skep)
+        # Stream memory reasoning
+        if not memory.enabled:
+            await self.stream_agent_reasoning("MEMORY", "Memory subsystem is disabled (baseline dual-model evaluation).")
+        else:
+            n_prec = len(recalled_precedents)
+            await self.stream_agent_reasoning(
+                "MEMORY",
+                f"Recalled {n_prec} precedents from {source_label} for {zone} ({', '.join(cause_tags) if cause_tags else 'general'}).",
+            )
+            for p in recalled_precedents[:3]:
+                await asyncio.sleep(0.04)
+                await self.stream_agent_reasoning("MEMORY", f"• [{p.source.upper()}] {p.text}")
+            if prior_res.applied:
+                await asyncio.sleep(0.04)
+                await self.stream_agent_reasoning(
+                    "MEMORY",
+                    f"{prior_res.reason} (corr: {real_corr:.2f} -> {post_corr:.2f}, skep: {real_skep:.2f} -> {post_skep:.2f})",
+                )
+            elif n_prec > 0:
+                await asyncio.sleep(0.04)
+                await self.stream_agent_reasoning("MEMORY", f"Precedents reviewed; baseline prior retained ({prior_res.reason}).")
+
+        # Governor fusion evaluation with memory
+        final_fused = post_fused
         sensitivity_thresh = self.governor_sensitivity
-        is_verified_by_gov = (final_fused > 0.35 and confidence >= sensitivity_thresh)
+        pre_verified = (raw_fused > 0.35 and confidence >= sensitivity_thresh)
+        post_verified = (post_fused > 0.35 and confidence >= sensitivity_thresh)
+        is_verified_by_gov = post_verified
+        is_suppressed_by_memory = (pre_verified and not post_verified and prior_res.applied)
+
+        if is_suppressed_by_memory:
+            suppress_line = f"Suppressed by memory ({prior_res.dominant_count} precedents)"
+            await self.stream_agent_reasoning(
+                "GOVERNOR",
+                f"Safety fusion: {suppress_line}. Prior adjusted fused score {raw_fused:+.2f} -> {post_fused:+.2f}.",
+            )
+            await self.stream_agent_reasoning("MEMORY", suppress_line)
+            gov_verdict = f"REJECTED AS FALSE ALARM ({suppress_line})"
+        elif is_verified_by_gov:
+            gov_verdict = "VERIFIED FOR DISPATCH"
+        else:
+            gov_verdict = "REJECTED AS FALSE ALARM"
+
         gov_summary = (
             f"Dual-model fusion complete: Fused {final_fused:+.2f} | Confidence {confidence:.2f} "
-            f"(Threshold: {sensitivity_thresh:.2f}) -> {'VERIFIED FOR DISPATCH' if is_verified_by_gov else 'REJECTED AS FALSE ALARM'}"
+            f"(Threshold: {sensitivity_thresh:.2f}) -> {gov_verdict}"
         )
         await self.stream_agent_reasoning("GOVERNOR", gov_summary)
+
+        # Construct comprehensive memory payload for websocket & incident
+        memory_payload = {
+            "enabled": memory.enabled,
+            "used": bool(prior_res.applied or len(recalled_precedents) > 0),
+            "source": source_label if (recalled_precedents and memory.enabled) else "none",
+            "precedents": [p.model_dump() for p in recalled_precedents],
+            "adjustment": {
+                "applied": prior_res.applied,
+                "corr_delta": prior_res.corr_delta,
+                "skep_delta": prior_res.skep_delta,
+                "delta": prior_res.delta,
+                "dominant": prior_res.dominant,
+                "dominant_count": prior_res.dominant_count,
+                "reason": prior_res.reason,
+            },
+            "pre_memory_scores": {
+                "corr": round(real_corr, 2),
+                "skep": round(real_skep, 2),
+                "fused": round(raw_fused, 2),
+            },
+            "post_memory_scores": {
+                "corr": round(post_corr, 2),
+                "skep": round(post_skep, 2),
+                "fused": round(post_fused, 2),
+            },
+            "suppressed_by_memory": is_suppressed_by_memory,
+        }
+        self.incident_memory[incident_id] = memory_payload
 
         for i, step in enumerate(steps):
             if i > 0:
@@ -337,19 +461,19 @@ class IncidentOrchestrator:
 
             # Interpolate towards real LLM scores
             if new_state == "OBSERVED":
-                corr = round(real_corr * 0.22, 2)
-                skep = round(real_skep * 0.40, 2)
+                corr = round(post_corr * 0.22, 2)
+                skep = round(post_skep * 0.40, 2)
             elif new_state == "CANDIDATE":
-                corr = round(real_corr * 0.71, 2)
-                skep = round(real_skep * 0.80, 2)
+                corr = round(post_corr * 0.71, 2)
+                skep = round(post_skep * 0.80, 2)
             else:
-                corr = real_corr
-                skep = real_skep
+                corr = post_corr
+                skep = post_skep
 
             fused = compute_fused_score(corr, skep)
 
             # Self-check assertion on final step
-            if i == len(steps) - 1:
+            if i == len(steps) - 1 or new_state == "REJECTED":
                 assert_terminal_state_matches(
                     fixture_state=new_state,
                     corroborator_score=corr,
@@ -359,15 +483,18 @@ class IncidentOrchestrator:
 
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            reasoning = await generate_reasoning(
-                state=new_state,
-                scenario=scenario,
-                zone=zone,
-                corroborator_score=corr,
-                skeptic_score=skep,
-                fused_score=fused,
-                fallback=step["reasoning"],
-            )
+            if is_suppressed_by_memory and new_state == "REJECTED":
+                reasoning = f"Suppressed by memory ({prior_res.dominant_count} precedents) — {prior_res.reason}"
+            else:
+                reasoning = await generate_reasoning(
+                    state=new_state,
+                    scenario=scenario,
+                    zone=zone,
+                    corroborator_score=corr,
+                    skeptic_score=skep,
+                    fused_score=fused,
+                    fallback=step["reasoning"],
+                )
 
             if degraded and not reasoning.endswith("[FALLBACK SCORING]"):
                 reasoning = f"{reasoning} [FALLBACK SCORING]"
@@ -385,6 +512,7 @@ class IncidentOrchestrator:
                 media_file=media_file,
                 timestamp=now_iso,
                 degraded=degraded,
+                memory=memory_payload,
             )
 
             # Persist incident
@@ -396,6 +524,7 @@ class IncidentOrchestrator:
                     "type": "incident_update",
                     "incident": incident.model_dump(),
                     "degraded": degraded,
+                    "memory": memory_payload,
                 }
             )
 
@@ -431,6 +560,37 @@ class IncidentOrchestrator:
                 await self.connection_manager.broadcast_json(
                     {"type": "audit_entry", "entry": skep_audit.model_dump()}
                 )
+
+                # Memory audit entries
+                if not memory.enabled:
+                    mem_audit = await self.db.append_audit_entry(
+                        actor="memory_subsystem",
+                        action="MEMORY_OFF",
+                        timestamp=now_iso,
+                    )
+                    await self.connection_manager.broadcast_json(
+                        {"type": "audit_entry", "entry": mem_audit.model_dump()}
+                    )
+                else:
+                    recall_action = f"MEMORY_RECALLED: {len(recalled_precedents)} precedents (source={source_label})"
+                    recall_audit = await self.db.append_audit_entry(
+                        actor="memory_subsystem",
+                        action=recall_action,
+                        timestamp=now_iso,
+                    )
+                    await self.connection_manager.broadcast_json(
+                        {"type": "audit_entry", "entry": recall_audit.model_dump()}
+                    )
+                    if prior_res.applied:
+                        adj_action = f"MEMORY_ADJUSTMENT: {prior_res.reason}"
+                        adj_audit = await self.db.append_audit_entry(
+                            actor="memory_subsystem",
+                            action=adj_action,
+                            timestamp=now_iso,
+                        )
+                        await self.connection_manager.broadcast_json(
+                            {"type": "audit_entry", "entry": adj_audit.model_dump()}
+                        )
             else:
                 actor = "safety_governor"
                 action = f"STATE_TRANSITION: {prev_state} -> {new_state}"
@@ -453,6 +613,7 @@ class IncidentOrchestrator:
             )
 
         logger.info("Completed scenario pipeline for %s (%s)", incident_id, scenario)
+
 
     async def override_reject_incident(
         self, incident_id: str, reason: str = "Operator manual override: marked as false positive"
