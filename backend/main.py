@@ -99,6 +99,7 @@ class ApproveResponse(BaseModel):
 
 class OverrideRejectRequest(BaseModel):
     reason: Optional[str] = "Operator manual override: marked as false positive"
+    cause_tag: Optional[str] = None
 
 
 class OverrideRejectResponse(BaseModel):
@@ -171,7 +172,9 @@ async def override_reject(
 ) -> OverrideRejectResponse:
     try:
         res = await orchestrator.override_reject_incident(
-            incident_id, req.reason or "Operator manual override: marked as false positive"
+            incident_id=incident_id,
+            reason=req.reason or "Operator manual override: marked as false positive",
+            cause_tag=req.cause_tag,
         )
         return OverrideRejectResponse(**res)
     except KeyError as e:

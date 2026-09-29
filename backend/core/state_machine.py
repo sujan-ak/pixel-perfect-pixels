@@ -22,7 +22,7 @@ from core.notifications import (
 )
 from database import DatabaseBackend, AuditEntry, Incident
 from memory import memory, compute_memory_prior
-from memory.schemas import Precedent
+from memory.schemas import Precedent, MemoryEvent
 
 logger = logging.getLogger("aurashield.core.state_machine")
 
@@ -146,7 +146,27 @@ class IncidentOrchestrator:
 
     def build_dispatch_plan(self, incident: Incident) -> dict:
         severity = "CRITICAL" if incident.corroborator_score > 0.7 else "HIGH"
-        hospital_id = self.twin.choose_hospital(severity)
+        default_hospital_id = self.twin.choose_hospital(severity)
+        hospital_id = default_hospital_id
+        memory_note = None
+
+        inc_hour = None
+        if incident.timestamp:
+            try:
+                if "T" in incident.timestamp:
+                    inc_hour = int(incident.timestamp.split("T")[1].split(":")[0])
+            except Exception:
+                pass
+        if inc_hour is None:
+            inc_hour = datetime.now(timezone.utc).hour
+
+        if memory.enabled and default_hospital_id == "H_ALPHA":
+            declines = memory.ledger.get_hospital_declines(hospital_id="H_ALPHA", hour=inc_hour)
+            if declines >= 3:
+                hospital_id = "H_BETA"
+                memory_note = f"Preferring H_BETA: H_ALPHA declined {declines} recent peak-hour dispatches"
+                logger.info("Hospital routing adjusted by memory: %s", memory_note)
+
         hospital = self.twin.hospitals.get(hospital_id)
         route_data = self.twin.plan_route(hospital_id, incident_node="N_CAM4")
 
@@ -165,13 +185,33 @@ class IncidentOrchestrator:
             "resources": ["Ambulance Unit #09", "Advanced Life Support"] if severity == "CRITICAL" else ["Basic Life Support"],
             "superseded_by": None,
             "superseded_reason": "",
+            "memory_note": memory_note,
         }
 
     def build_stage2_dispatch_plan(self, incident: Incident) -> dict:
         severity = "CRITICAL" if incident.corroborator_score > 0.7 else "HIGH"
         incident_node = "N_CAM4"
-        # Suitability first, then reachability and shortest graph path from N_CAM4
-        hospital_id = self.twin.choose_hospital(severity, src_node=incident_node)
+        default_hospital_id = self.twin.choose_hospital(severity, src_node=incident_node)
+        hospital_id = default_hospital_id
+        memory_note = None
+
+        inc_hour = None
+        if incident.timestamp:
+            try:
+                if "T" in incident.timestamp:
+                    inc_hour = int(incident.timestamp.split("T")[1].split(":")[0])
+            except Exception:
+                pass
+        if inc_hour is None:
+            inc_hour = datetime.now(timezone.utc).hour
+
+        if memory.enabled and default_hospital_id == "H_ALPHA":
+            declines = memory.ledger.get_hospital_declines(hospital_id="H_ALPHA", hour=inc_hour)
+            if declines >= 3:
+                hospital_id = "H_BETA"
+                memory_note = f"Preferring H_BETA: H_ALPHA declined {declines} recent peak-hour dispatches"
+                logger.info("Stage 2 hospital routing adjusted by memory: %s", memory_note)
+
         hospital = self.twin.hospitals.get(hospital_id)
         route_data = self.twin.plan_route(hospital_id, incident_node=incident_node, src_node=incident_node)
 
@@ -190,6 +230,7 @@ class IncidentOrchestrator:
             "resources": ["Ambulance Unit #09", "Advanced Life Support"] if severity == "CRITICAL" else ["Basic Life Support"],
             "superseded_by": None,
             "superseded_reason": "",
+            "memory_note": memory_note,
         }
 
     async def stream_agent_reasoning(self, agent: str, text: str) -> None:
@@ -614,9 +655,31 @@ class IncidentOrchestrator:
 
         logger.info("Completed scenario pipeline for %s (%s)", incident_id, scenario)
 
+        # PHASE 6: Retain terminal state event (INCIDENT_VERIFIED or INCIDENT_REJECTED)
+        term_kind = "INCIDENT_VERIFIED" if prev_state in ("VERIFIED", "RESPONSE_PROPOSED") else "INCIDENT_REJECTED"
+        term_event = MemoryEvent(
+            event_id=f"evt_{incident_id}_{term_kind.lower()}",
+            ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            kind=term_kind,
+            incident_id=incident_id,
+            zone=zone,
+            scenario=scenario,
+            cause_tags=cause_tags,
+            outcome=term_kind,
+            confidence=confidence,
+            corr_score=post_corr,
+            skeptic_score=post_skep,
+            fused_score=post_fused,
+            notes=f"Pipeline reached {prev_state}. Verified={is_verified_by_gov}, SuppressedByMemory={is_suppressed_by_memory}",
+        )
+        asyncio.create_task(memory.retain(term_event))
+
 
     async def override_reject_incident(
-        self, incident_id: str, reason: str = "Operator manual override: marked as false positive"
+        self,
+        incident_id: str,
+        reason: str = "Operator manual override: marked as false positive",
+        cause_tag: Optional[str] = None,
     ) -> dict:
         incident = await self.db.get_incident_by_id(incident_id)
         if not incident:
@@ -629,6 +692,19 @@ class IncidentOrchestrator:
 
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # Derive cause tags for memory
+        tags = [cause_tag.lower()] if cause_tag else []
+        if not tags:
+            lower_r = reason.lower()
+            if "glare" in lower_r or "lens" in lower_r or "sun" in lower_r:
+                tags = ["glare"]
+            elif "shadow" in lower_r:
+                tags = ["shadow"]
+            elif "vibration" in lower_r or "wind" in lower_r or "shake" in lower_r:
+                tags = ["vibration"]
+            else:
+                tags = SCENARIO_FIXTURES.get(incident.scenario, {}).get("cause_tags", ["other"])
+
         # Emit audit entry
         action_str = f"OPERATOR_OVERRIDE_REJECT: {incident.id} — {reason}"
         audit_entry = await self.db.append_audit_entry(
@@ -639,6 +715,25 @@ class IncidentOrchestrator:
         await self.connection_manager.broadcast_json(
             {"type": "audit_entry", "entry": audit_entry.model_dump()}
         )
+
+        # PHASE 6: Retain OPERATOR_OVERRIDE in memory
+        ov_event = MemoryEvent(
+            event_id=f"evt_{incident.id}_override",
+            ts=now_iso,
+            kind="OPERATOR_OVERRIDE",
+            incident_id=incident.id,
+            zone=incident.zone,
+            scenario=incident.scenario,
+            cause_tags=tags,
+            operator_action="OVERRIDE_REJECT",
+            outcome="REJECTED_FALSE_ALARM",
+            confidence=incident.confidence,
+            corr_score=incident.corroborator_score,
+            skeptic_score=incident.skeptic_score,
+            fused_score=incident.fused_score,
+            notes=f"Operator override: marked false alarm due to {', '.join(tags)}. Detail: {reason}",
+        )
+        asyncio.create_task(memory.retain(ov_event))
 
         updated_incident = Incident(
             id=incident.id,
@@ -653,6 +748,7 @@ class IncidentOrchestrator:
             media_file=incident.media_file,
             timestamp=now_iso,
             degraded=incident.degraded,
+            memory=incident.memory or self.incident_memory.get(incident.id),
         )
         await self.db.save_incident(updated_incident)
         await self.connection_manager.broadcast_json(
@@ -706,6 +802,36 @@ class IncidentOrchestrator:
         self.acknowledgements = []
         self.ack_deadline_ms = int(time.time() * 1000) + 20000
 
+        # PHASE 6: Retain OPERATOR_APPROVED in memory
+        cause_tags = SCENARIO_FIXTURES.get(incident.scenario, {}).get("cause_tags", ["collision"])
+        app_event = MemoryEvent(
+            event_id=f"evt_{incident.id}_approved",
+            ts=now_iso,
+            kind="OPERATOR_APPROVED",
+            incident_id=incident.id,
+            zone=incident.zone,
+            scenario=incident.scenario,
+            cause_tags=cause_tags,
+            operator_action="APPROVE",
+            outcome="DISPATCH_APPROVED",
+            confidence=incident.confidence,
+            corr_score=incident.corroborator_score,
+            skeptic_score=incident.skeptic_score,
+            fused_score=incident.fused_score,
+            notes=f"Operator confirmed collision and approved emergency dispatch for {incident.id}.",
+        )
+        asyncio.create_task(memory.retain(app_event))
+
+        # Check hospital learning note in active plan
+        if self.active_plan.get("memory_note"):
+            hosp_audit = await self.db.append_audit_entry(
+                actor="memory_subsystem",
+                action=f"HOSPITAL_LEARNING: {self.active_plan['memory_note']}",
+                timestamp=now_iso,
+            )
+            await self.connection_manager.broadcast_json({"type": "audit_entry", "entry": hosp_audit.model_dump()})
+            await self.stream_agent_reasoning("MEMORY", f"Hospital routing advisory: {self.active_plan['memory_note']}")
+
         # Police Emergency Notification (idempotent, dynamic location and severity)
         location_label = f"{incident.zone} (NH-44 Gachibowli Junction), Hyderabad"
         await dispatch_police_notification(
@@ -753,6 +879,7 @@ class IncidentOrchestrator:
 
         return {"status": "approved", "sms_payload": sms_payload}
 
+
     async def acknowledge_dispatch(
         self, incident_id: Optional[str] = None, source: str = "responder_iphone", channel: str = "responder_device"
     ) -> dict:
@@ -772,6 +899,12 @@ class IncidentOrchestrator:
             "channel": channel,
             "at_ms": int(time.time() * 1000),
         })
+
+        # Calculate ack latency
+        ack_latency_ms = 8500
+        if self.ack_deadline_ms:
+            time_left_ms = self.ack_deadline_ms - int(time.time() * 1000)
+            ack_latency_ms = max(500, 20000 - max(0, time_left_ms))
         self.ack_deadline_ms = None
 
         await self.db.save_incident(inc)
@@ -788,14 +921,34 @@ class IncidentOrchestrator:
         )
         await self.stream_agent_reasoning(
             "DISPATCH",
-            f"Ambulance Unit responder acknowledged dispatch on mobile device ({source})."
+            f"Ambulance Unit responder acknowledged dispatch on mobile device ({source}) [latency: {ack_latency_ms}ms]."
         )
+
+        # PHASE 6: Retain DISPATCH_ACKED
+        hosp_id = self.active_plan.get("hospital_id") if self.active_plan else "H_ALPHA"
+        ack_event = MemoryEvent(
+            event_id=f"evt_{inc.id}_ack",
+            ts=now_iso,
+            kind="DISPATCH_ACKED",
+            incident_id=inc.id,
+            zone=inc.zone,
+            scenario=inc.scenario,
+            cause_tags=SCENARIO_FIXTURES.get(inc.scenario, {}).get("cause_tags", []),
+            operator_action="ACK_DISPATCH",
+            outcome="DISPATCH_ACCEPTED",
+            hospital_id=hosp_id,
+            ack_latency_ms=ack_latency_ms,
+            notes=f"Emergency dispatch acknowledged by {source} via {channel} with {ack_latency_ms}ms latency.",
+        )
+        asyncio.create_task(memory.retain(ack_event))
+
         return await self.build_mobile_state()
 
     async def decline_dispatch(
         self, incident_id: Optional[str] = None, source: str = "responder_iphone"
     ) -> dict:
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        inc = await self.db.get_incident_by_id(incident_id) if incident_id else await self.db.get_latest_incident()
         audit_entry = await self.db.append_audit_entry(
             actor="responder_device",
             action=f"RESPONDER_DECLINED: dispatch declined by {source}",
@@ -808,6 +961,24 @@ class IncidentOrchestrator:
             "DISPATCH",
             f"Responder {source} declined dispatch. Backup reroute initiated."
         )
+
+        # PHASE 6: Retain DISPATCH_DECLINED
+        hosp_id = self.active_plan.get("hospital_id") if self.active_plan else "H_ALPHA"
+        dec_event = MemoryEvent(
+            event_id=f"evt_{inc.id if inc else 'inc'}_{int(time.time())}_declined",
+            ts=now_iso,
+            kind="DISPATCH_DECLINED",
+            incident_id=inc.id if inc else "unknown",
+            zone=inc.zone if inc else "Zone 04",
+            scenario=inc.scenario if inc else "crash_zone04",
+            cause_tags=SCENARIO_FIXTURES.get(inc.scenario, {}).get("cause_tags", []) if inc else [],
+            operator_action="DECLINE_DISPATCH",
+            outcome="DISPATCH_DECLINED",
+            hospital_id=hosp_id,
+            notes=f"Dispatch to hospital {hosp_id} was declined by {source}.",
+        )
+        asyncio.create_task(memory.retain(dec_event))
+
         return await self.build_mobile_state()
 
     async def update_field_status(
@@ -839,6 +1010,17 @@ class IncidentOrchestrator:
             self.active_plan = self.build_stage2_dispatch_plan(inc)
             logger.info("Stage 2 pickup-to-hospital route plan generated for %s (dest: %s, eta: %ds)",
                         inc.id, self.active_plan["hospital_id"], self.active_plan["eta_seconds"])
+
+            # Check hospital learning advisory
+            if self.active_plan.get("memory_note"):
+                hosp_audit = await self.db.append_audit_entry(
+                    actor="memory_subsystem",
+                    action=f"HOSPITAL_LEARNING: {self.active_plan['memory_note']}",
+                    timestamp=now_iso,
+                )
+                await self.connection_manager.broadcast_json({"type": "audit_entry", "entry": hosp_audit.model_dump()})
+                await self.stream_agent_reasoning("MEMORY", f"Stage 2 routing advisory: {self.active_plan['memory_note']}")
+
             location_label = f"{inc.zone} (NH-44 Gachibowli Junction), Hyderabad"
             await dispatch_hospital_notification(
                 db=self.db,
@@ -847,6 +1029,25 @@ class IncidentOrchestrator:
                 location_label=location_label,
                 connection_manager=self.connection_manager,
             )
+
+        # PHASE 6: Retain INCIDENT_CLOSED when reaching HANDED_OVER or CLOSED
+        if status in ("HANDED_OVER", "CLOSED"):
+            hosp_id = self.active_plan.get("hospital_id") if self.active_plan else "H_ALPHA"
+            close_event = MemoryEvent(
+                event_id=f"evt_{inc.id}_closed",
+                ts=now_iso,
+                kind="INCIDENT_CLOSED",
+                incident_id=inc.id,
+                zone=inc.zone,
+                scenario=inc.scenario,
+                cause_tags=SCENARIO_FIXTURES.get(inc.scenario, {}).get("cause_tags", []),
+                operator_action="FIELD_COMPLETION",
+                outcome="PATIENT_DELIVERED_CLOSED",
+                hospital_id=hosp_id,
+                confidence=inc.confidence,
+                notes=f"Patient successfully transferred to emergency care at {hosp_id}. Incident {inc.id} completed.",
+            )
+            asyncio.create_task(memory.retain(close_event))
 
         await self.db.save_incident(inc)
         await self.connection_manager.broadcast_json(
@@ -881,6 +1082,24 @@ class IncidentOrchestrator:
                 await self.connection_manager.broadcast_json(
                     {"type": "audit_entry", "entry": audit_entry.model_dump()}
                 )
+
+                # PHASE 6: Retain ACK_TIMEOUT
+                hosp_id = self.active_plan.get("hospital_id") if self.active_plan else "H_ALPHA"
+                to_event = MemoryEvent(
+                    event_id=f"evt_{inc.id}_{int(time.time())}_timeout",
+                    ts=now_iso,
+                    kind="ACK_TIMEOUT",
+                    incident_id=inc.id,
+                    zone=inc.zone,
+                    scenario=inc.scenario,
+                    cause_tags=SCENARIO_FIXTURES.get(inc.scenario, {}).get("cause_tags", []),
+                    operator_action="TIMEOUT_EXPIRED",
+                    outcome="ACK_TIMEOUT",
+                    hospital_id=hosp_id,
+                    notes=f"Mobile responder ACK deadline expired (20s) for {inc.id} at hospital {hosp_id}.",
+                )
+                asyncio.create_task(memory.retain(to_event))
+
         return await self.build_mobile_state()
 
     async def build_mobile_state(self) -> dict:

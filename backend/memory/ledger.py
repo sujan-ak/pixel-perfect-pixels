@@ -152,6 +152,45 @@ class MemoryLedger:
             total=total,
         )
 
+    def sync_read_all(self) -> List[MemoryEvent]:
+        """Synchronously read events for fast, non-blocking route evaluations."""
+        if not self.file_path.exists():
+            return []
+        events: List[MemoryEvent] = []
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        events.append(MemoryEvent.model_validate(data))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning("Error reading ledger synchronously: %s", e)
+        return events
+
+    def get_hospital_declines(self, hospital_id: str = "H_ALPHA", hour: Optional[int] = None) -> int:
+        """Count recent declines and timeouts for a hospital, optionally filtered to a +/- 1 hour band."""
+        events = self.sync_read_all()
+        count = 0
+        for ev in reversed(events):
+            if ev.hospital_id == hospital_id and ev.kind in ("DISPATCH_DECLINED", "ACK_TIMEOUT"):
+                if hour is not None:
+                    ts = ev.ts or ""
+                    if "T" in ts:
+                        try:
+                            ev_h = int(ts.split("T")[1][:2])
+                            if abs(ev_h - hour) <= 1:
+                                count += 1
+                        except Exception:
+                            pass
+                else:
+                    count += 1
+        return count
+
     async def clear(self) -> None:
         async with self._lock:
             def _clr():
