@@ -129,7 +129,9 @@ export function AuditLedger({
               <th className="py-1.5 px-2 font-normal w-24">Time (UTC)</th>
               <th className="py-1.5 px-2 font-normal w-36">Actor</th>
               <th className="py-1.5 px-2 font-normal">Action</th>
-              <th className="py-1.5 pl-2 pr-4 font-normal text-right">Hash chain (prev &rarr; current)</th>
+              <th className="py-1.5 pl-2 pr-4 font-normal text-right">
+                Hash chain (prev &rarr; current)
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-line/40">
@@ -142,15 +144,14 @@ export function AuditLedger({
             ) : (
               entries.map((e, i) => {
                 const isLatest = i === entries.length - 1;
-                const prevHash = i === 0 ? "0000...0000" : (entries[i - 1]?.current_hash ?? "0000...0000");
+                const prevHash =
+                  i === 0 ? "0000...0000" : (entries[i - 1]?.current_hash ?? "0000...0000");
 
                 const isTampered =
                   effectiveBrokenId !== null &&
                   (e.id === effectiveBrokenId || (isChainBroken && chain?.broken_at === e.id));
 
-                const isDownstream =
-                  effectiveBrokenId !== null &&
-                  e.id > effectiveBrokenId;
+                const isDownstream = effectiveBrokenId !== null && e.id > effectiveBrokenId;
 
                 return (
                   <tr
@@ -160,21 +161,25 @@ export function AuditLedger({
                       restoreSweep
                         ? "bg-signal-verified/15 text-signal-verified"
                         : isTampered
-                        ? "bg-signal-rejected/25 border-l-4 border-l-signal-rejected font-medium"
-                        : isDownstream
-                        ? "opacity-35 grayscale border-l-2 border-l-line/40 select-none hover:opacity-50"
-                        : isLatest
-                        ? "audit-row-enter hover:bg-bg-panel-raised/60"
-                        : "hover:bg-bg-panel-raised/60"
+                          ? "bg-signal-rejected/25 border-l-4 border-l-signal-rejected font-medium"
+                          : isDownstream
+                            ? "opacity-35 grayscale border-l-2 border-l-line/40 select-none hover:opacity-50"
+                            : isLatest
+                              ? "audit-row-enter hover:bg-bg-panel-raised/60"
+                              : "hover:bg-bg-panel-raised/60"
                     }`}
                   >
                     {/* Index */}
-                    <td className={`py-1.5 pl-4 pr-2 ${isTampered ? "text-signal-rejected font-bold" : "text-text-muted"}`}>
+                    <td
+                      className={`py-1.5 pl-4 pr-2 ${isTampered ? "text-signal-rejected font-bold" : "text-text-muted"}`}
+                    >
                       {String(e.id).padStart(3, "0")}
                     </td>
 
                     {/* Timestamp */}
-                    <td className={`py-1.5 px-2 ${isTampered ? "text-signal-rejected" : "text-text-muted"}`}>
+                    <td
+                      className={`py-1.5 px-2 ${isTampered ? "text-signal-rejected" : "text-text-muted"}`}
+                    >
                       {new Date(e.timestamp).toISOString().slice(11, 19)}
                     </td>
 
@@ -185,10 +190,10 @@ export function AuditLedger({
                           isTampered
                             ? "text-signal-rejected font-bold"
                             : e.actor === "system"
-                            ? "text-text-muted"
-                            : e.actor === "operator_1"
-                            ? "text-signal-pending font-medium"
-                            : "text-signal-verified font-medium"
+                              ? "text-text-muted"
+                              : e.actor === "operator_1"
+                                ? "text-signal-pending font-medium"
+                                : "text-signal-verified font-medium"
                         }
                       >
                         {e.actor}
@@ -198,7 +203,11 @@ export function AuditLedger({
                     {/* Action */}
                     <td className="py-1.5 px-2">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className={isTampered ? "text-signal-rejected font-bold" : "text-text-primary"}>
+                        <span
+                          className={
+                            isTampered ? "text-signal-rejected font-bold" : "text-text-primary"
+                          }
+                        >
                           {e.action}
                         </span>
                         {isTampered && (

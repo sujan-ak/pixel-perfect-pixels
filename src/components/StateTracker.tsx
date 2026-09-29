@@ -44,7 +44,7 @@ export function StateTracker({
   const candidateIndex = STATES.indexOf("CANDIDATE");
 
   const phase1States = STATES.slice(0, 6); // OBSERVED -> COORDINATION_IN_PROGRESS
-  const phase2States = STATES.slice(6);    // ACKNOWLEDGED -> CLOSED
+  const phase2States = STATES.slice(6); // ACKNOWLEDGED -> CLOSED
 
   const renderStateCell = (s: (typeof STATES)[number], idx: number) => {
     const isPast = !isRejected && currentIndex > idx;
@@ -55,10 +55,10 @@ export function StateTracker({
       s === "OBSERVED" || s === "CANDIDATE"
         ? "border-signal-pending text-signal-pending bg-signal-pending/10"
         : s === "CLOSED"
-        ? "border-signal-closed text-text-muted bg-signal-closed/10"
-        : s === "ACKNOWLEDGED" || s === "EN_ROUTE" || s === "ON_SCENE" || s === "HANDED_OVER"
-        ? "border-emerald-500 text-emerald-400 bg-emerald-500/10"
-        : "border-signal-verified text-signal-verified bg-signal-verified/10";
+          ? "border-signal-closed text-text-muted bg-signal-closed/10"
+          : s === "ACKNOWLEDGED" || s === "EN_ROUTE" || s === "ON_SCENE" || s === "HANDED_OVER"
+            ? "border-emerald-500 text-emerald-400 bg-emerald-500/10"
+            : "border-signal-verified text-signal-verified bg-signal-verified/10";
 
     return (
       <motion.div
@@ -68,8 +68,8 @@ export function StateTracker({
           isCurrent
             ? `${activeColor} ring-1 ring-current`
             : isPast || isPastBeforeReject
-            ? "border-signal-verified/40 bg-signal-verified/5 text-signal-verified"
-            : "border-line bg-bg-void text-text-muted/60"
+              ? "border-signal-verified/40 bg-signal-verified/5 text-signal-verified"
+              : "border-line bg-bg-void text-text-muted/60"
         }`}
         animate={isCurrent ? { scale: [1, 1.03, 1] } : { scale: 1 }}
         transition={{ duration: 0.2 }}
@@ -92,17 +92,15 @@ export function StateTracker({
                   ? s === "OBSERVED" || s === "CANDIDATE"
                     ? "bg-signal-pending animate-pulse"
                     : s === "CLOSED"
-                    ? "bg-signal-closed"
-                    : "bg-signal-verified animate-pulse"
+                      ? "bg-signal-closed"
+                      : "bg-signal-verified animate-pulse"
                   : "bg-line"
               }`}
             />
           )}
         </div>
 
-        <span className="truncate w-full text-center leading-tight">
-          {SHORT_LABELS[s] ?? s}
-        </span>
+        <span className="truncate w-full text-center leading-tight">{SHORT_LABELS[s] ?? s}</span>
       </motion.div>
     );
   };
@@ -128,11 +126,14 @@ export function StateTracker({
               </span>
             )}
             <span className="rounded border border-line bg-bg-panel-raised px-2 py-0.5 font-sans text-label text-text-muted">
-              Active: <span className="text-text-primary font-medium">{FULL_LABELS[state] ?? state}</span>
+              Active:{" "}
+              <span className="text-text-primary font-medium">{FULL_LABELS[state] ?? state}</span>
             </span>
           </div>
         ) : (
-          <span className="font-sans text-label text-text-muted">Standby &mdash; no active sequence</span>
+          <span className="font-sans text-label text-text-muted">
+            Standby &mdash; no active sequence
+          </span>
         )}
       </div>
 

@@ -6,7 +6,7 @@ load_dotenv()
 def test_twilio():
     twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-    dispatch_to = os.getenv("TWILIO_DISPATCH_TO") or "+917893910211"
+    dispatch_to = os.getenv("TWILIO_DISPATCH_TO") or "+910000000000"
     whatsapp_from = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
     sms_body = "TEST VERIFIED INCIDENT Zone 04 — severity 0.92 — AuraShield automated test"
 

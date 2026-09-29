@@ -23,7 +23,11 @@ function formatStateLabel(state: IncidentState): string {
   }
 }
 
-export function IncidentHistory({ currentIncidentState }: { currentIncidentState?: IncidentState | null }) {
+export function IncidentHistory({
+  currentIncidentState,
+}: {
+  currentIncidentState?: IncidentState | null;
+}) {
   const [history, setHistory] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -105,7 +109,9 @@ export function IncidentHistory({ currentIncidentState }: { currentIncidentState
                     </span>
                   </td>
                   <td className="py-1.5 px-2 text-text-primary font-medium">
-                    {item.fused_score > 0 ? `+${item.fused_score.toFixed(2)}` : item.fused_score.toFixed(2)}
+                    {item.fused_score > 0
+                      ? `+${item.fused_score.toFixed(2)}`
+                      : item.fused_score.toFixed(2)}
                   </td>
                   <td className="py-1.5 pl-2 pr-4 text-right text-text-muted">
                     {new Date(item.timestamp).toISOString().replace("T", " ").slice(0, 19)}

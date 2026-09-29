@@ -119,7 +119,7 @@ export function VideoFeed({ incident }: { incident: Incident | null }) {
         {incident && (
           <span
             className={`flex items-center gap-1.5 rounded border px-2 py-0.5 font-sans text-label font-medium ${getStateBadgeClass(
-              incident.state
+              incident.state,
             )}`}
           >
             <span
@@ -127,10 +127,10 @@ export function VideoFeed({ incident }: { incident: Incident | null }) {
                 incident.state === "REJECTED"
                   ? "bg-signal-rejected"
                   : incident.state === "OBSERVED" || incident.state === "CANDIDATE"
-                  ? "bg-signal-pending animate-pulse"
-                  : incident.state === "CLOSED" || incident.state === "ACKNOWLEDGED"
-                  ? "bg-signal-closed"
-                  : "bg-signal-verified animate-pulse"
+                    ? "bg-signal-pending animate-pulse"
+                    : incident.state === "CLOSED" || incident.state === "ACKNOWLEDGED"
+                      ? "bg-signal-closed"
+                      : "bg-signal-verified animate-pulse"
               }`}
             />
             {formatStateLabel(incident.state)}
@@ -138,8 +138,8 @@ export function VideoFeed({ incident }: { incident: Incident | null }) {
         )}
 
         {/* Live feed vs NO SIGNAL fallback badge */}
-        {mediaFile && (
-          videoError || !isPlaying ? (
+        {mediaFile &&
+          (videoError || !isPlaying ? (
             <span className="flex items-center gap-1 rounded border border-signal-pending/60 bg-signal-pending/15 px-2 py-0.5 font-mono text-label font-medium text-signal-pending">
               <AlertTriangle className="h-3 w-3" />
               <span>NO SIGNAL · STILL POSTER</span>
@@ -149,8 +149,7 @@ export function VideoFeed({ incident }: { incident: Incident | null }) {
               <span className="h-1.5 w-1.5 rounded-full bg-signal-verified animate-pulse" />
               <span>LIVE</span>
             </span>
-          )
-        )}
+          ))}
       </div>
 
       {/* Top-Right: Zone Telemetry */}
@@ -164,7 +163,9 @@ export function VideoFeed({ incident }: { incident: Incident | null }) {
         <div className="absolute bottom-3 left-3 flex items-center gap-2 rounded border border-line bg-bg-panel/90 px-2.5 py-1 font-mono text-label text-text-muted">
           <span className="text-text-primary">{incident.id}</span>
           <span className="text-line">|</span>
-          <span>{new Date(incident.timestamp).toISOString().replace("T", " ").slice(0, 19)} UTC</span>
+          <span>
+            {new Date(incident.timestamp).toISOString().replace("T", " ").slice(0, 19)} UTC
+          </span>
         </div>
       )}
     </div>

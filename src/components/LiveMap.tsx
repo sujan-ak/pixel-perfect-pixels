@@ -16,7 +16,7 @@ import {
 import type { Incident } from "@/lib/aurashield/types";
 
 // Hyderabad Coordinates & Metadata
-const HYD_CENTER: [number, number] = [17.3850, 78.4867];
+const HYD_CENTER: [number, number] = [17.385, 78.4867];
 
 interface CameraZone {
   id: string;
@@ -26,10 +26,30 @@ interface CameraZone {
 }
 
 const CAMERA_ZONES: CameraZone[] = [
-  { id: "Zone 01", name: "Lakdikapul Intersect", pos: [17.3980, 78.4730], description: "Arterial NW Feed" },
-  { id: "Zone 02", name: "Koti Sultan Bazar", pos: [17.3910, 78.4980], description: "Commercial Corridor East" },
-  { id: "Zone 03", name: "Nampally Station Rd", pos: [17.3710, 78.4680], description: "Transit Hub South" },
-  { id: "Zone 04", name: "MJ Market Junction", pos: [17.3850, 78.4867], description: "Central Ring Primary" },
+  {
+    id: "Zone 01",
+    name: "Lakdikapul Intersect",
+    pos: [17.398, 78.473],
+    description: "Arterial NW Feed",
+  },
+  {
+    id: "Zone 02",
+    name: "Koti Sultan Bazar",
+    pos: [17.391, 78.498],
+    description: "Commercial Corridor East",
+  },
+  {
+    id: "Zone 03",
+    name: "Nampally Station Rd",
+    pos: [17.371, 78.468],
+    description: "Transit Hub South",
+  },
+  {
+    id: "Zone 04",
+    name: "MJ Market Junction",
+    pos: [17.385, 78.4867],
+    description: "Central Ring Primary",
+  },
 ];
 
 const HOSPITAL = {
@@ -41,18 +61,18 @@ const HOSPITAL = {
 const FIRE_STATION = {
   name: "Gowliguda Fire Station",
   type: "Emergency Response Unit 01",
-  pos: [17.3810, 78.4910] as [number, number],
+  pos: [17.381, 78.491] as [number, number],
 };
 
 // Route waypoints from Zone 04 (MJ Market) to Osmania General Hospital
 const CORRIDOR_ROUTE: [number, number][] = [
-  [17.3850, 78.4867], // Zone 04 - Incident Origin
-  [17.3830, 78.4855], // Signal 1: MJ Market North
+  [17.385, 78.4867], // Zone 04 - Incident Origin
+  [17.383, 78.4855], // Signal 1: MJ Market North
   [17.3808, 78.4842], // Signal 2: Siddiamber Bazar
-  [17.3785, 78.4830], // Signal 3: Begum Bazar Arterial
+  [17.3785, 78.483], // Signal 3: Begum Bazar Arterial
   [17.3762, 78.4818], // Signal 4: Afzalgunj Junction
-  [17.3740, 78.4806], // Signal 5: Nayapul Approach
-  [17.3725, 78.4800], // Signal 6: Hospital Gate Entry
+  [17.374, 78.4806], // Signal 5: Nayapul Approach
+  [17.3725, 78.48], // Signal 6: Hospital Gate Entry
   [17.3715, 78.4795], // Hospital Destination
 ];
 
@@ -64,12 +84,12 @@ interface TrafficSignal {
 }
 
 const TRAFFIC_SIGNALS: TrafficSignal[] = [
-  { id: "SIG_HYD_04A", name: "MJ Market North", pos: [17.3830, 78.4855], junctionNumber: 1 },
+  { id: "SIG_HYD_04A", name: "MJ Market North", pos: [17.383, 78.4855], junctionNumber: 1 },
   { id: "SIG_HYD_04B", name: "Siddiamber Bazar", pos: [17.3808, 78.4842], junctionNumber: 2 },
-  { id: "SIG_HYD_04C", name: "Begum Bazar Arterial", pos: [17.3785, 78.4830], junctionNumber: 3 },
+  { id: "SIG_HYD_04C", name: "Begum Bazar Arterial", pos: [17.3785, 78.483], junctionNumber: 3 },
   { id: "SIG_HYD_04D", name: "Afzalgunj Junction", pos: [17.3762, 78.4818], junctionNumber: 4 },
-  { id: "SIG_HYD_04E", name: "Nayapul North Approach", pos: [17.3740, 78.4806], junctionNumber: 5 },
-  { id: "SIG_HYD_04F", name: "Hospital Emergency Entry", pos: [17.3725, 78.4800], junctionNumber: 6 },
+  { id: "SIG_HYD_04E", name: "Nayapul North Approach", pos: [17.374, 78.4806], junctionNumber: 5 },
+  { id: "SIG_HYD_04F", name: "Hospital Emergency Entry", pos: [17.3725, 78.48], junctionNumber: 6 },
 ];
 
 export interface ActuationLogEntry {
@@ -126,10 +146,10 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
   // Detect whether approval is active
   const approved = Boolean(
     isApproved ||
-      (incident &&
-        ["OPERATOR_APPROVED", "COORDINATION_IN_PROGRESS", "ACKNOWLEDGED", "CLOSED"].includes(
-          incident.state,
-        )),
+    (incident &&
+      ["OPERATOR_APPROVED", "COORDINATION_IN_PROGRESS", "ACKNOWLEDGED", "CLOSED"].includes(
+        incident.state,
+      )),
   );
 
   // Initialize Leaflet Map safely in browser environment
@@ -150,8 +170,8 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
         zoomControl: false,
       });
 
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors',
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap contributors",
         maxZoom: 19,
       }).addTo(map);
 
@@ -223,9 +243,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
           iconSize: [180, 26],
           iconAnchor: [90, 13],
         }),
-      })
-        .addTo(map)
-        .bindPopup(`
+      }).addTo(map).bindPopup(`
           <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
             <div class="font-bold text-[#22d3ee]">${HOSPITAL.name}</div>
             <div class="text-text-muted mt-1">${HOSPITAL.type}</div>
@@ -247,9 +265,7 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
           iconSize: [170, 26],
           iconAnchor: [85, 13],
         }),
-      })
-        .addTo(map)
-        .bindPopup(`
+      }).addTo(map).bindPopup(`
           <div class="p-2 font-sans text-xs bg-bg-panel text-text-primary border border-line rounded">
             <div class="font-bold text-[#f5a623]">${FIRE_STATION.name}</div>
             <div class="text-text-muted mt-1">${FIRE_STATION.type}</div>
@@ -404,7 +420,8 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
 
         // 3. Post municipal signal override to backend audit ledger
         const now = new Date();
-        const timeStr = now.toTimeString().slice(0, 8) + "." + String(now.getMilliseconds()).padStart(3, "0");
+        const timeStr =
+          now.toTimeString().slice(0, 8) + "." + String(now.getMilliseconds()).padStart(3, "0");
         const latency = Math.floor(32 + Math.random() * 24);
 
         try {
@@ -532,13 +549,17 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
       if (progress < 1) {
         animationFrameRef.current = requestAnimationFrame(animate);
       } else {
-        ambulanceMarker.bindPopup(`
+        ambulanceMarker
+          .bindPopup(
+            `
           <div class="p-2 font-sans text-xs bg-bg-panel text-signal-verified border border-signal-verified rounded">
             <div class="font-bold">AMBULANCE UNIT #09 REACHED DESTINATION</div>
             <div class="text-text-muted mt-1">Transferred to Sunshine Hospital Emergency Trauma Ward.</div>
             <div class="text-signal-data mt-1 font-mono text-[10px]">TIME SAVED: 4m 20s via Green Corridor</div>
           </div>
-        `).openPopup();
+        `,
+          )
+          .openPopup();
       }
     };
 
@@ -710,7 +731,8 @@ export function LiveMap({ incident, isApproved, onSignalActuated }: LiveMapProps
               SIMULATED MUNICIPAL SIGNAL API
             </div>
             <p className="mt-1 font-sans text-[11px] text-text-muted leading-tight">
-              Pre-emption commands sent via municipal traffic broker emulation. One SHA-256 ledger block appended per actuation.
+              Pre-emption commands sent via municipal traffic broker emulation. One SHA-256 ledger
+              block appended per actuation.
             </p>
           </div>
 
