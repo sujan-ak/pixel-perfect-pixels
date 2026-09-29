@@ -31,6 +31,9 @@ class MemoryEvent(BaseModel):
     corr_score: Optional[float] = None
     skeptic_score: Optional[float] = None
     fused_score: Optional[float] = None
+    pre_memory_fused: Optional[float] = None
+    post_memory_fused: Optional[float] = None
+    precedents_count: Optional[int] = None
     hospital_id: Optional[str] = None
     ack_latency_ms: Optional[int] = None
     notes: Optional[str] = None
@@ -65,3 +68,36 @@ class MemoryStats(BaseModel):
     declines: int = 0
     timeouts: int = 0
     total: int = 0
+
+
+class MemoryToggleRequest(BaseModel):
+    enabled: bool
+
+
+class InsightsResponse(BaseModel):
+    insights: str
+    cached: bool
+    timestamp: str
+
+
+class LearningCurvePoint(BaseModel):
+    run: int
+    scenario: str
+    pre_memory_fused: float
+    post_memory_fused: float
+    verdict: str
+    precedents: int
+    timestamp: Optional[str] = None
+
+
+class MemorySeedResponse(BaseModel):
+    status: str
+    seeded_count: int
+    skipped_count: int
+    total_ledger: int
+
+
+class MemoryResetResponse(BaseModel):
+    status: str
+    message: str
+

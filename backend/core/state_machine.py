@@ -422,7 +422,14 @@ class IncidentOrchestrator:
         pre_verified = (raw_fused > 0.35 and confidence >= sensitivity_thresh)
         post_verified = (post_fused > 0.35 and confidence >= sensitivity_thresh)
         is_verified_by_gov = post_verified
-        is_suppressed_by_memory = (pre_verified and not post_verified and prior_res.applied)
+        is_suppressed_by_memory = bool(
+            memory.enabled
+            and not post_verified
+            and (
+                (pre_verified and prior_res.applied)
+                or (prior_res.dominant == "false_alarm" and prior_res.dominant_count >= 3 and real_corr < 0.85)
+            )
+        )
 
         if is_suppressed_by_memory:
             suppress_line = f"Suppressed by memory ({prior_res.dominant_count} precedents)"
@@ -527,6 +534,9 @@ class IncidentOrchestrator:
             if is_suppressed_by_memory and new_state == "REJECTED":
                 reasoning = f"Suppressed by memory ({prior_res.dominant_count} precedents) — {prior_res.reason}"
             else:
+                fallback_text = step["reasoning"]
+                if new_state == "REJECTED" and "VERIFIED" in fallback_text:
+                    fallback_text = f"REJECTED: fused score {fused:+.2f} below threshold (corr={corr:.2f}, skep={skep:.2f})"
                 reasoning = await generate_reasoning(
                     state=new_state,
                     scenario=scenario,
@@ -534,7 +544,7 @@ class IncidentOrchestrator:
                     corroborator_score=corr,
                     skeptic_score=skep,
                     fused_score=fused,
-                    fallback=step["reasoning"],
+                    fallback=fallback_text,
                 )
 
             if degraded and not reasoning.endswith("[FALLBACK SCORING]"):
@@ -670,6 +680,9 @@ class IncidentOrchestrator:
             corr_score=post_corr,
             skeptic_score=post_skep,
             fused_score=post_fused,
+            pre_memory_fused=round(raw_fused, 2),
+            post_memory_fused=round(post_fused, 2),
+            precedents_count=len(recalled_precedents),
             notes=f"Pipeline reached {prev_state}. Verified={is_verified_by_gov}, SuppressedByMemory={is_suppressed_by_memory}",
         )
         asyncio.create_task(memory.retain(term_event))
@@ -1201,6 +1214,7 @@ class IncidentOrchestrator:
             "scenarios": {
                 "crash_zone04": {"name": "MJ Market Arterial Crash (Zone 04)", "clip": "scenario_a_collision.mp4"},
                 "false_alarm": {"name": "False Alarm - Shadow & Reflection", "clip": "scenario_b_false_alarm.mp4"},
+                "glare_ambiguous": {"name": "Low-Sun Optical Glare (Zone 02)", "clip": "traffic_false_alarm.mp4"},
             },
             "incident": mobile_inc,
             "twin": self.twin.snapshot(),

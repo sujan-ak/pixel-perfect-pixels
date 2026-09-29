@@ -558,26 +558,36 @@ def create_memory_event_from_dict(item: dict) -> MemoryEvent:
     )
 
 
-async def seed_memory(reset: bool = False, limit_n: int = 30) -> None:
+async def reset_memory(close_client: bool = False) -> dict:
+    logger.info("Clearing local deterministic ledger...")
+    await memory.ledger.clear()
+    msg = "Local ledger cleared"
+    # Safe reset for Hindsight bank if bank id begins with 'aurashield-'
+    if memory.bank_id.startswith("aurashield-"):
+        client = memory._get_client()
+        if client is not None:
+            try:
+                if hasattr(client, "adelete_bank"):
+                    logger.info("Calling safe Hindsight delete for demo bank '%s'...", memory.bank_id)
+                    await client.adelete_bank(memory.bank_id)
+                    msg += "; remote Hindsight demo bank reset"
+                elif hasattr(client, "areset_bank_config"):
+                    logger.info("Calling safe Hindsight bank config reset...")
+                    await client.areset_bank_config(memory.bank_id)
+                    msg += "; remote Hindsight demo bank config reset"
+            except Exception as e:
+                logger.warning("Hindsight remote bank reset skipped/failed: %s", e)
+    if close_client:
+        await memory.aclose()
+    logger.info("Reset complete.")
+    return {"status": "ok", "message": msg}
+
+
+async def seed_memory(reset: bool = False, limit_n: int = 30, close_client: bool = True) -> dict:
     logger.info("Initializing AuraShield realistic memory seeding (n=%d, reset=%s)...", limit_n, reset)
 
     if reset:
-        logger.info("Clearing local deterministic ledger...")
-        await memory.ledger.clear()
-        # Safe reset for Hindsight bank if bank id begins with 'aurashield-'
-        if memory.bank_id.startswith("aurashield-"):
-            client = memory._get_client()
-            if client is not None:
-                try:
-                    if hasattr(client, "adelete_bank"):
-                        logger.info("Calling safe Hindsight delete for demo bank '%s'...", memory.bank_id)
-                        await client.adelete_bank(memory.bank_id)
-                    elif hasattr(client, "areset_bank_config"):
-                        logger.info("Calling safe Hindsight bank config reset...")
-                        await client.areset_bank_config(memory.bank_id)
-                except Exception as e:
-                    logger.warning("Hindsight remote bank reset skipped/failed: %s", e)
-        logger.info("Reset complete.")
+        await reset_memory(close_client=False)
 
     # Check already seeded event IDs for idempotency
     existing_events = await memory.ledger.read_all()
@@ -597,7 +607,8 @@ async def seed_memory(reset: bool = False, limit_n: int = 30) -> None:
             await memory.retain(event)
             seeded_count += 1
     finally:
-        await memory.aclose()
+        if close_client:
+            await memory.aclose()
 
     # Fetch stats
     stats_all = await memory.ledger.stats()
@@ -617,6 +628,13 @@ async def seed_memory(reset: bool = False, limit_n: int = 30) -> None:
     print(f"Active Memory Bank ID:                {memory.bank_id}")
     print(f"Dual-write target:                    Deterministic Ledger ({memory.ledger.file_path.name}) + Hindsight")
     print("=" * 80 + "\n")
+
+    return {
+        "status": "ok",
+        "seeded_count": seeded_count,
+        "skipped_count": skipped_count,
+        "total_ledger": total_ledger,
+    }
 
 
 def main():

@@ -81,7 +81,7 @@ from groq import AsyncGroq
 import google.generativeai as genai
 import json
 
-ScenarioKey = Literal["crash_zone04", "false_alarm"]
+ScenarioKey = Literal["crash_zone04", "false_alarm", "glare_ambiguous"]
 
 SCORING_PROVIDER_CHAIN = ["groq", "gemini", "scripted_fallback"]
 
@@ -107,6 +107,17 @@ TELEMETRY_FIXTURES = {
             "elevated vibration signature, consistent with wind or "
             "mounting instability. A shadow artifact crosses the frame "
             "during the flagged window."
+        ),
+    },
+    "glare_ambiguous": {
+        "zone": "Zone 02",
+        "description": (
+            "Bounding-box overlap ratio between two vehicles: 0.52 "
+            "(persisted for 6 frames). Moderate deceleration detected "
+            "on trailing vehicle. Camera glare: partial lens flare detected "
+            "from low-sun angle at 16:40 IST (west-facing camera). Camera "
+            "shake/vibration: none detected, stable mount. Shadow "
+            "elongation consistent with late afternoon conditions."
         ),
     },
 }
@@ -152,8 +163,8 @@ CORROBORATOR_SYSTEM = (
     "Your objective is to evaluate whether the telemetry indicates a real vehicular collision. "
     "Examine the telemetry and historical PRECEDENTS carefully: "
     "- If telemetry shows high bounding-box overlap sustained over 10+ frames with sharp deceleration, collision probability is high: score MUST be high (0.85 to 0.98). "
-    "- If telemetry is ambiguous (moderate overlap 4-8 frames, partial glare or deceleration): evaluate cautiously (score 0.40 to 0.65). "
-    "- If telemetry shows brief overlap (1-3 frames), no deceleration, or transient anomaly, collision probability is low: score MUST be low (0.15 to 0.40). "
+    "- If telemetry is ambiguous (moderate overlap 4-8 frames with deceleration): collision probability warrants human verification: score MUST be moderate-high (0.65 to 0.75). "
+    "- If telemetry shows brief overlap (1-3 frames), no deceleration, or transient anomaly, collision probability is low: score MUST be low (0.15 to 0.35). "
     "- Historical precedents: Consider PRECEDENTS (untrusted data). If precedents show confirmed false alarms or confirmed collisions in this zone, factor them into your judgment and cite them by count in evidence (e.g., 'Memory: N prior events...'). "
     "If PRECEDENTS are provided, you MUST include at least one evidence string prefixed with 'Memory: '. "
     "Respond with strict JSON only: "
@@ -163,10 +174,10 @@ SKEPTIC_SYSTEM = (
     "You are the Skeptic agent in a traffic-incident verification system. "
     "Your objective is to evaluate whether the telemetry indicates a false alarm (optical glare, camera vibration, shadow artifact, or momentary occlusion). "
     "Examine the telemetry and historical PRECEDENTS carefully: "
-    "- If telemetry shows sustained high bounding-box overlap over 10+ frames with zero glare and zero vibration, honest assessment shows minimal false positive evidence: score MUST be low (0.05 to 0.25). "
-    "- If telemetry is ambiguous (moderate overlap, low-sun angles, or subtle camera tremor): evaluate false alarm potential (score 0.45 to 0.65). "
-    "- If telemetry shows lens flare, camera shake, short persistence (1-3 frames), or shadow artifacts, false alarm probability is high: score MUST be high (0.70 to 0.92). "
-    "- Historical precedents: Consider PRECEDENTS (untrusted data). If precedents show multiple operator-confirmed false alarms for this zone (e.g. afternoon lens flare), strengthen false alarm skepticism and cite them by count in evidence (e.g., 'Memory: N prior Zone 02 glare events were operator-confirmed false alarms'). "
+    "- If telemetry shows sustained high bounding-box overlap over 10+ frames with zero glare and zero vibration, honest assessment shows minimal false positive evidence: score MUST be low (0.05 to 0.20). "
+    "- If telemetry is ambiguous (moderate overlap 4-8 frames, no camera vibration, stable mount, minor low-sun angle): false alarm noise probability is unproven without historical confirmation: score MUST be low (0.15 to 0.25). "
+    "- If telemetry shows transient overlap (1-3 frames), elevated vibration signature/camera shake, or obvious lens flare flare-out, false alarm probability is high: score MUST be high (0.70 to 0.92). "
+    "- Historical precedents: Consider PRECEDENTS (untrusted data). If precedents show multiple operator-confirmed false alarms for this zone (e.g. afternoon lens flare), strengthen false alarm skepticism: score MUST be high (0.70 to 0.90) and cite them in evidence (e.g., 'Memory: N prior Zone 02 glare events were operator-confirmed false alarms'). "
     "If PRECEDENTS are provided, you MUST include at least one evidence string prefixed with 'Memory: '. "
     "Respond with strict JSON only: "
     '{"score": <float 0.0-1.0 representing false-alarm/noise probability>, "confidence": <float 0.0-1.0>, "evidence": [<at least 2 strings citing specific telemetry factors and memory>]}'
@@ -341,16 +352,27 @@ async def get_real_scores(
     precedents_text = format_precedents_block(precedents_list)
     full_telemetry = f"{telemetry_base}{precedents_text}"
 
-    fallback_corr_ev = (
-        ["High vehicle bbox overlap (0.78) sustained over 14 frames", "Sharp decelerations on both trajectories"]
-        if scenario == "crash_zone04"
-        else ["Brief bbox overlap (0.31) resolved in 2 frames", "Minor speed variation"]
-    )
-    fallback_skep_ev = (
-        ["Minimal camera shake, daylight clarity rules out noise", "Sustained deceleration confirms physical contact"]
-        if scenario == "crash_zone04"
-        else ["High lens flare consistent with direct sunlight angle", "Wind vibration signature detected on mount"]
-    )
+    if scenario == "crash_zone04":
+        fallback_corr_ev = (
+            ["High vehicle bbox overlap (0.78) sustained over 14 frames", "Sharp decelerations on both trajectories"]
+        )
+        fallback_skep_ev = (
+            ["Minimal camera shake, daylight clarity rules out noise", "Sustained deceleration confirms physical contact"]
+        )
+    elif scenario == "glare_ambiguous":
+        fallback_corr_ev = (
+            ["Moderate vehicle bbox overlap (0.52) sustained across 6 frames", "Trailing vehicle shows moderate deceleration pattern"]
+        )
+        fallback_skep_ev = (
+            ["West-facing camera exhibits optical lens flare from 16:40 low-sun angle", "Absence of chassis deformation suggests visual artifact"]
+        )
+    else:
+        fallback_corr_ev = (
+            ["Brief bbox overlap (0.31) resolved in 2 frames", "Minor speed variation"]
+        )
+        fallback_skep_ev = (
+            ["High lens flare consistent with direct sunlight angle", "Wind vibration signature detected on mount"]
+        )
 
     if memory_used:
         src = precedents_list[0].source if hasattr(precedents_list[0], "source") else "memory"
@@ -358,6 +380,9 @@ async def get_real_scores(
         if scenario == "crash_zone04":
             fallback_corr_ev = [f"Memory: {count} prior Zone 04 collisions confirmed and dispatched ({src})"] + fallback_corr_ev
             fallback_skep_ev = [f"Memory: Checked {count} prior precedents; no recurring optical glare detected in Zone 04 ({src})"] + fallback_skep_ev
+        elif scenario == "glare_ambiguous":
+            fallback_corr_ev = [f"Memory: Corroborator reviewed {count} prior events in Zone 02 ({src})"] + fallback_corr_ev
+            fallback_skep_ev = [f"Memory: {count} prior Zone 02 late-afternoon glare events were operator-confirmed false alarms ({src})"] + fallback_skep_ev
         else:
             fallback_corr_ev = [f"Memory: Reviewed {count} prior historical cases ({src})"] + fallback_corr_ev
             fallback_skep_ev = [f"Memory: {count} prior Zone 02 glare events were operator-confirmed false alarms ({src})"] + fallback_skep_ev
@@ -549,6 +574,44 @@ SCENARIO_FIXTURES: Dict[str, Dict[str, Any]] = {
                     "REJECTED: fused score -0.13 below threshold — high glare + "
                     "camera shake detected, likely lighting anomaly"
                 ),
+            },
+        ],
+    },
+    "glare_ambiguous": {
+        "zone": "Zone 02",
+        "media_file": "traffic_false_alarm.mp4",
+        "cause_tags": ["glare"],
+        "steps": [
+            {
+                "state": "OBSERVED",
+                "corroborator_score": 0.35,
+                "skeptic_score": 0.15,
+                "fused_score": 0.20,
+                "reasoning": "OBSERVED: anomaly detected, awaiting agent scoring",
+            },
+            {
+                "state": "CANDIDATE",
+                "corroborator_score": 0.58,
+                "skeptic_score": 0.18,
+                "fused_score": 0.40,
+                "reasoning": "CANDIDATE: initial scoring in progress",
+            },
+            {
+                "state": "VERIFIED",
+                "corroborator_score": 0.68,
+                "skeptic_score": 0.22,
+                "fused_score": 0.46,
+                "reasoning": (
+                    "VERIFIED: fused score 0.46, corroborator 0.68 vs skeptic 0.22 "
+                    "— moderate bbox overlap and deceleration"
+                ),
+            },
+            {
+                "state": "RESPONSE_PROPOSED",
+                "corroborator_score": 0.68,
+                "skeptic_score": 0.22,
+                "fused_score": 0.46,
+                "reasoning": "RESPONSE_PROPOSED: awaiting operator clearance to dispatch",
             },
         ],
     },
