@@ -10,11 +10,13 @@ import {
   Power,
   RotateCcw,
   Shield,
+  Sun,
   X,
 } from "lucide-react";
 import { AgentTugOfWar } from "./AgentTugOfWar";
 import { AuditLedger } from "./AuditLedger";
 import { IncidentHistory } from "./IncidentHistory";
+import { MemoryPanel } from "./MemoryPanel";
 import { OperatorControlBar } from "./OperatorControlBar";
 import { LiveMap } from "./LiveMap";
 import { ReasoningTerminal } from "./ReasoningTerminal";
@@ -47,6 +49,17 @@ export function ControlRoom() {
     setGovernorSensitivity,
     overrideReject,
     clearReasoningLogs,
+    memoryEnabled,
+    setMemoryEnabled,
+    memoryStatus,
+    refreshMemoryStatus,
+    precedents,
+    insights,
+    refreshInsights,
+    learningCurve,
+    refreshLearningCurve,
+    memoryTimeline,
+    refreshTimeline,
   } = useAuraShield();
 
   const [utcTime, setUtcTime] = useState("");
@@ -143,8 +156,8 @@ export function ControlRoom() {
                 ? link === "online"
                   ? "border-signal-verified text-signal-verified bg-signal-verified/10"
                   : link === "connecting"
-                  ? "border-signal-pending text-signal-pending bg-signal-pending/10"
-                  : "border-signal-rejected text-signal-rejected bg-signal-rejected/10"
+                    ? "border-signal-pending text-signal-pending bg-signal-pending/10"
+                    : "border-signal-rejected text-signal-rejected bg-signal-rejected/10"
                 : "border-signal-pending text-signal-pending bg-signal-pending/10"
             }`}
           >
@@ -154,8 +167,8 @@ export function ControlRoom() {
                   ? link === "online"
                     ? "bg-signal-verified animate-pulse"
                     : link === "connecting"
-                    ? "bg-signal-pending animate-pulse"
-                    : "bg-signal-rejected"
+                      ? "bg-signal-pending animate-pulse"
+                      : "bg-signal-rejected"
                   : "bg-signal-pending"
               }`}
             />
@@ -164,8 +177,8 @@ export function ControlRoom() {
                 ? link === "online"
                   ? "Live backend · Online"
                   : link === "connecting"
-                  ? "Live backend · Connecting..."
-                  : "Live feed disconnected — retrying in 3s..."
+                    ? "Live backend · Connecting..."
+                    : "Live feed disconnected — retrying in 3s..."
                 : "Mock data mode"}
             </span>
           </div>
@@ -206,6 +219,15 @@ export function ControlRoom() {
             >
               <AlertTriangle className="h-4 w-4" />
               <span>Trigger false alarm scenario</span>
+            </button>
+
+            <button
+              disabled={busy || runningBoth}
+              onClick={() => triggerScenario("glare_ambiguous")}
+              className="flex items-center gap-2 rounded border border-purple-500/40 bg-purple-500/10 px-3 py-1.5 font-sans text-label font-medium text-purple-300 transition-colors hover:bg-purple-500/20 disabled:opacity-40 focus-visible:ring-1 focus-visible:ring-signal-data"
+            >
+              <Sun className="h-4 w-4 text-purple-400" />
+              <span>Trigger ambiguous glare scenario</span>
             </button>
 
             <button
@@ -257,13 +279,13 @@ export function ControlRoom() {
           incident={incident}
           onOverrideReject={overrideReject}
           canReject={Boolean(
-            incident &&
-            incident.state !== "REJECTED" &&
-            incident.state !== "CLOSED"
+            incident && incident.state !== "REJECTED" && incident.state !== "CLOSED",
           )}
           sensitivity={governorSensitivity}
           onSensitivityChange={setGovernorSensitivity}
           busy={busy}
+          memoryEnabled={memoryEnabled}
+          onToggleMemory={setMemoryEnabled}
         />
 
         {/* Live Adversarial Streaming Reasoning Terminal */}
@@ -289,8 +311,9 @@ export function ControlRoom() {
                   <span>Awaiting operator clearance</span>
                 </div>
                 <p className="mt-1 font-sans text-body text-text-primary">
-                  <span className="font-semibold text-signal-verified">{incident?.zone}</span> &middot;{" "}
-                  Dual-agent threshold met. Automated dispatch requires an authenticated operator decision.
+                  <span className="font-semibold text-signal-verified">{incident?.zone}</span>{" "}
+                  &middot; Dual-agent threshold met. Automated dispatch requires an authenticated
+                  operator decision.
                 </p>
               </div>
 
@@ -310,14 +333,32 @@ export function ControlRoom() {
           incident={incident}
           isApproved={Boolean(
             incident &&
-              ["OPERATOR_APPROVED", "COORDINATION_IN_PROGRESS", "ACKNOWLEDGED", "CLOSED"].includes(
-                incident.state,
-              ),
+            ["OPERATOR_APPROVED", "COORDINATION_IN_PROGRESS", "ACKNOWLEDGED", "CLOSED"].includes(
+              incident.state,
+            ),
           )}
           onSignalActuated={() => {
             verifyChain();
           }}
         />
+
+        {/* Hindsight Persistent Operational Memory & Learning Curve */}
+        <div>
+          <MemoryPanel
+            memoryEnabled={memoryEnabled}
+            onToggleMemory={setMemoryEnabled}
+            memoryStatus={memoryStatus}
+            precedents={precedents}
+            insights={insights}
+            onRefreshInsights={refreshInsights}
+            learningCurve={learningCurve}
+            onRefreshLearningCurve={refreshLearningCurve}
+            timeline={memoryTimeline}
+            onRefreshTimeline={refreshTimeline}
+            currentIncident={incident}
+            busy={busy}
+          />
+        </div>
 
         {/* 3. Bottom Zone: Immutable Monospace Audit Ledger */}
         <div>

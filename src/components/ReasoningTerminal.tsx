@@ -25,6 +25,8 @@ export function ReasoningTerminal({ logs, isStreaming, onClear }: ReasoningTermi
         return "text-rose-400 font-bold";
       case "GOVERNOR":
         return "text-amber-400 font-bold";
+      case "MEMORY":
+        return "text-purple-400 font-bold";
       default:
         return "text-signal-data font-bold";
     }
@@ -40,9 +42,7 @@ export function ReasoningTerminal({ logs, isStreaming, onClear }: ReasoningTermi
             Agent Reasoning Terminal
           </span>
           <span className="text-line">/</span>
-          <span className="font-sans text-xs text-text-muted">
-            Adversarial consensus engine
-          </span>
+          <span className="font-sans text-xs text-text-muted">Adversarial consensus engine</span>
         </div>
 
         <div className="flex items-center gap-3">
@@ -58,9 +58,7 @@ export function ReasoningTerminal({ logs, isStreaming, onClear }: ReasoningTermi
             </span>
           )}
 
-          <span className="font-mono text-xs text-text-muted">
-            {logs.length} / 200 lines
-          </span>
+          <span className="font-mono text-xs text-text-muted">{logs.length} / 200 lines</span>
 
           <button
             onClick={onClear}
@@ -80,9 +78,7 @@ export function ReasoningTerminal({ logs, isStreaming, onClear }: ReasoningTermi
       >
         {logs.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center text-text-muted">
-            <p className="text-text-muted">
-              [SYSTEM] Awaiting agent verification stream...
-            </p>
+            <p className="text-text-muted">[SYSTEM] Awaiting agent verification stream...</p>
             <p className="mt-1 text-[11px] text-text-muted/60">
               Trigger a scenario or adjust Governor Sensitivity to observe adversarial reasoning.
             </p>
@@ -91,12 +87,8 @@ export function ReasoningTerminal({ logs, isStreaming, onClear }: ReasoningTermi
           <div className="space-y-1">
             {logs.map((item) => (
               <div key={item.id} className="flex items-start gap-2 break-words">
-                <span className="shrink-0 text-text-muted opacity-60">
-                  {item.timestamp}
-                </span>
-                <span className={`shrink-0 ${getAgentColor(item.agent)}`}>
-                  [{item.agent}]
-                </span>
+                <span className="shrink-0 text-text-muted opacity-60">{item.timestamp}</span>
+                <span className={`shrink-0 ${getAgentColor(item.agent)}`}>[{item.agent}]</span>
                 <span className="text-text-primary/90">{item.text}</span>
               </div>
             ))}

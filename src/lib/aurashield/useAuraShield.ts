@@ -1,10 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MOCK_AUDIT_SEED, MOCK_SCENARIOS, shortHash } from "./mockData";
+import {
+  MOCK_AUDIT_SEED,
+  MOCK_SCENARIOS,
+  MOCK_MEMORY_STATUS,
+  MOCK_MEMORY_INSIGHTS,
+  MOCK_LEARNING_CURVE,
+  MOCK_MEMORY_TIMELINE,
+  shortHash,
+} from "./mockData";
 import type {
   ApproveResponse,
   AuditEntry,
   ChainVerifyResponse,
   Incident,
+  LearningCurvePoint,
+  MemoryEvent,
+  MemoryStatus,
+  Precedent,
   ScenarioKey,
   WsMessage,
 } from "./types";
@@ -16,7 +28,7 @@ export type LinkStatus = "offline" | "connecting" | "online";
 
 export interface ReasoningLogItem {
   id: string;
-  agent: "CORROBORATOR" | "SKEPTIC" | "GOVERNOR" | "SYSTEM";
+  agent: "CORROBORATOR" | "SKEPTIC" | "GOVERNOR" | "MEMORY" | "SYSTEM";
   text: string;
   timestamp: string;
 }
@@ -36,6 +48,20 @@ export function useAuraShield() {
   const [automationPaused, setAutomationPausedState] = useState(false);
   const [governorSensitivity, setGovernorSensitivityState] = useState(0.65);
 
+  // Phase 8: Hindsight Memory Subsystem state
+  const [memoryEnabled, setMemoryEnabledState] = useState<boolean>(true);
+  const [memoryStatus, setMemoryStatus] = useState<MemoryStatus | null>(
+    API_URL ? null : MOCK_MEMORY_STATUS,
+  );
+  const [precedents, setPrecedents] = useState<Precedent[]>([]);
+  const [insights, setInsights] = useState<string>(API_URL ? "" : MOCK_MEMORY_INSIGHTS.insights);
+  const [learningCurve, setLearningCurve] = useState<LearningCurvePoint[]>(
+    API_URL ? [] : MOCK_LEARNING_CURVE,
+  );
+  const [memoryTimeline, setMemoryTimeline] = useState<MemoryEvent[]>(
+    API_URL ? [] : MOCK_MEMORY_TIMELINE,
+  );
+
   const wsRef = useRef<WebSocket | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const streamTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -48,7 +74,11 @@ export function useAuraShield() {
   };
 
   const addReasoningLog = useCallback(
-    (agent: "CORROBORATOR" | "SKEPTIC" | "GOVERNOR" | "SYSTEM", text: string, timestamp?: string) => {
+    (
+      agent: "CORROBORATOR" | "SKEPTIC" | "GOVERNOR" | "MEMORY" | "SYSTEM",
+      text: string,
+      timestamp?: string,
+    ) => {
       const ts = timestamp ?? new Date().toTimeString().slice(0, 8);
       setReasoningLogs((prev) => [
         ...prev.slice(-199),
@@ -110,21 +140,33 @@ export function useAuraShield() {
         if (msg.type === "incident_update") {
           const inc = {
             ...msg.incident,
-            degraded: (msg as any).degraded ?? msg.incident.degraded ?? false,
+            degraded: msg.degraded ?? msg.incident.degraded ?? false,
           };
           setIncident(inc);
+          if (inc.memory?.precedents) {
+            setPrecedents(inc.memory.precedents);
+          }
         }
         if (msg.type === "audit_entry")
-          setAudit((prev) => (prev.some((e) => e.id === msg.entry.id) ? prev : [...prev, msg.entry]));
+          setAudit((prev) =>
+            prev.some((e) => e.id === msg.entry.id) ? prev : [...prev, msg.entry],
+          );
         if (msg.type === "audit_sync") setAudit(msg.entries);
         if (msg.type === "agent_reasoning_chunk") {
-          addReasoningLog(msg.agent, msg.text, (msg as any).timestamp);
+          addReasoningLog(msg.agent, msg.text, msg.timestamp);
         }
         if (msg.type === "governor_sensitivity") {
           setGovernorSensitivityState(msg.sensitivity);
         }
         if (msg.type === "automation_pause_status") {
           setAutomationPausedState(msg.paused);
+        }
+        if (msg.type === "memory_status") {
+          setMemoryStatus(msg.status);
+          setMemoryEnabledState(msg.status.enabled);
+        }
+        if (msg.type === "memory_event") {
+          setMemoryTimeline((prev) => [msg.event, ...prev.slice(0, 49)]);
         }
       } catch {
         /* ignore malformed frame */
@@ -134,7 +176,7 @@ export function useAuraShield() {
       ws.close();
       wsRef.current = null;
     };
-  }, [mode]);
+  }, [mode, addReasoningLog]);
 
   useEffect(() => () => clearTimers(), []);
 
@@ -212,11 +254,16 @@ export function useAuraShield() {
     });
     after.forEach((state, i) => {
       timers.current.push(
-        setTimeout(() => {
-          setIncident((prev) => (prev ? { ...prev, state, reasoning: `${state}: dispatch pipeline` } : prev));
-          pushAudit("dispatch_coordinator", `STATE_TRANSITION: -> ${state}`);
-          if (i === after.length - 1) setBusy(false);
-        }, (i + 1) * 1200),
+        setTimeout(
+          () => {
+            setIncident((prev) =>
+              prev ? { ...prev, state, reasoning: `${state}: dispatch pipeline` } : prev,
+            );
+            pushAudit("dispatch_coordinator", `STATE_TRANSITION: -> ${state}`);
+            if (i === after.length - 1) setBusy(false);
+          },
+          (i + 1) * 1200,
+        ),
       );
     });
   }, [incident, mode, pushAudit]);
@@ -231,7 +278,11 @@ export function useAuraShield() {
       }
       return;
     }
-    setChain({ valid: true, checked_blocks: audit.length || MOCK_AUDIT_SEED.length, broken_at: null });
+    setChain({
+      valid: true,
+      checked_blocks: audit.length || MOCK_AUDIT_SEED.length,
+      broken_at: null,
+    });
   }, [audit.length, mode]);
 
   const refreshAudit = useCallback(async () => {
@@ -265,8 +316,10 @@ export function useAuraShield() {
         if (targetRow) {
           setAudit((prev) =>
             prev.map((item, idx) =>
-              idx === targetIdx ? { ...item, action: `${item.action} [UNAUTHORIZED MUTATION]` } : item
-            )
+              idx === targetIdx
+                ? { ...item, action: `${item.action} [UNAUTHORIZED MUTATION]` }
+                : item,
+            ),
           );
           setChain({ valid: false, checked_blocks: targetIdx, broken_at: targetRow.id });
           return { tampered_row_id: targetRow.id, zone: "Zone 04" };
@@ -292,23 +345,27 @@ export function useAuraShield() {
         prev.map((item) => ({
           ...item,
           action: item.action.replace(" [UNAUTHORIZED MUTATION]", ""),
-        }))
+        })),
       );
-      setChain({ valid: true, checked_blocks: audit.length || MOCK_AUDIT_SEED.length, broken_at: null });
+      setChain({
+        valid: true,
+        checked_blocks: audit.length || MOCK_AUDIT_SEED.length,
+        broken_at: null,
+      });
       return { restored_row_id: 0 };
     }
     return null;
   }, [audit.length, mode, refreshAudit, verifyChain]);
 
   const overrideReject = useCallback(
-    async (incidentId: string, reason?: string) => {
+    async (incidentId: string, reason?: string, cause_tag?: string) => {
       const overrideReason = reason || "Operator manual override: marked as false positive";
       if (mode === "live" && API_URL) {
         try {
           await fetch(`${API_URL}/incidents/${incidentId}/override-reject`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ reason: overrideReason }),
+            body: JSON.stringify({ reason: overrideReason, cause_tag: cause_tag || null }),
           });
         } catch (e) {
           console.error("Override reject failed", e);
@@ -324,10 +381,13 @@ export function useAuraShield() {
               state: "REJECTED",
               reasoning: `REJECTED: Operator manual override — ${overrideReason}`,
             }
-          : prev
+          : prev,
       );
       pushAudit("operator_1", `OPERATOR_OVERRIDE_REJECT: ${incidentId} — ${overrideReason}`);
-      addReasoningLog("GOVERNOR", `OVERRIDE: Operator rejected incident ${incidentId}. State -> REJECTED.`);
+      addReasoningLog(
+        "GOVERNOR",
+        `OVERRIDE: Operator rejected incident ${incidentId}. State -> REJECTED.`,
+      );
       setBusy(false);
     },
     [addReasoningLog, mode, pushAudit],
@@ -369,7 +429,10 @@ export function useAuraShield() {
           /* fallback */
         }
       } else {
-        pushAudit("operator_1", paused ? "AUTOMATION_PAUSED_BY_OPERATOR" : "AUTOMATION_RESUMED_BY_OPERATOR");
+        pushAudit(
+          "operator_1",
+          paused ? "AUTOMATION_PAUSED_BY_OPERATOR" : "AUTOMATION_RESUMED_BY_OPERATOR",
+        );
         addReasoningLog(
           "GOVERNOR",
           paused
@@ -384,6 +447,109 @@ export function useAuraShield() {
   const clearReasoningLogs = useCallback(() => {
     setReasoningLogs([]);
   }, []);
+
+  // Phase 8: Memory Subsystem API controls & fetchers
+  const refreshMemoryStatus = useCallback(async () => {
+    if (mode === "live" && API_URL) {
+      try {
+        const res = await fetch(`${API_URL}/memory/status`);
+        if (res.ok) {
+          const data = (await res.json()) as MemoryStatus;
+          setMemoryStatus(data);
+          setMemoryEnabledState(data.enabled);
+        }
+      } catch {
+        /* ignore */
+      }
+    } else {
+      setMemoryStatus(MOCK_MEMORY_STATUS);
+    }
+  }, [mode]);
+
+  const setMemoryEnabled = useCallback(
+    async (enabled: boolean) => {
+      setMemoryEnabledState(enabled);
+      if (mode === "live" && API_URL) {
+        try {
+          const res = await fetch(`${API_URL}/memory/toggle`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled }),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as MemoryStatus;
+            setMemoryStatus(data);
+          }
+        } catch {
+          /* fallback */
+        }
+      } else {
+        setMemoryStatus((prev) => (prev ? { ...prev, enabled } : null));
+        pushAudit("operator_1", `MEMORY_TOGGLED: enabled=${enabled}`);
+        addReasoningLog(
+          "MEMORY",
+          `Memory subsystem toggled ${enabled ? "ON" : "OFF"} by operator.`,
+        );
+      }
+    },
+    [addReasoningLog, mode, pushAudit],
+  );
+
+  const refreshInsights = useCallback(async () => {
+    if (mode === "live" && API_URL) {
+      try {
+        const res = await fetch(`${API_URL}/memory/insights`);
+        if (res.ok) {
+          const data = await res.json();
+          setInsights(data.insights || "");
+        }
+      } catch {
+        /* ignore */
+      }
+    } else {
+      setInsights(MOCK_MEMORY_INSIGHTS.insights);
+    }
+  }, [mode]);
+
+  const refreshLearningCurve = useCallback(async () => {
+    if (mode === "live" && API_URL) {
+      try {
+        const res = await fetch(`${API_URL}/memory/learning-curve`);
+        if (res.ok) {
+          const data = (await res.json()) as LearningCurvePoint[];
+          setLearningCurve(data);
+        }
+      } catch {
+        /* ignore */
+      }
+    } else {
+      setLearningCurve(MOCK_LEARNING_CURVE);
+    }
+  }, [mode]);
+
+  const refreshTimeline = useCallback(async () => {
+    if (mode === "live" && API_URL) {
+      try {
+        const res = await fetch(`${API_URL}/memory/timeline?limit=50`);
+        if (res.ok) {
+          const data = (await res.json()) as MemoryEvent[];
+          setMemoryTimeline(data);
+        }
+      } catch {
+        /* ignore */
+      }
+    } else {
+      setMemoryTimeline(MOCK_MEMORY_TIMELINE);
+    }
+  }, [mode]);
+
+  // Initial load of memory datasets
+  useEffect(() => {
+    refreshMemoryStatus();
+    refreshInsights();
+    refreshLearningCurve();
+    refreshTimeline();
+  }, [refreshInsights, refreshLearningCurve, refreshMemoryStatus, refreshTimeline]);
 
   return {
     mode,
@@ -410,5 +576,15 @@ export function useAuraShield() {
     setGovernorSensitivity,
     overrideReject,
     clearReasoningLogs,
+    memoryEnabled,
+    setMemoryEnabled,
+    memoryStatus,
+    precedents,
+    insights,
+    refreshInsights,
+    learningCurve,
+    refreshLearningCurve,
+    memoryTimeline,
+    refreshTimeline,
   };
 }

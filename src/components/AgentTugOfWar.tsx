@@ -10,8 +10,23 @@ export function AgentTugOfWar({ incident }: { incident: Incident | null }) {
   const skeptic = incident?.skeptic_score ?? 0;
   const fused = incident?.fused_score ?? 0;
   const confidence = incident?.confidence ?? 0.9;
+
+  const preMemoryFused = incident?.memory?.pre_memory_scores?.fused;
+  const memoryApplied = Boolean(
+    incident?.memory?.adjustment?.applied && preMemoryFused !== undefined,
+  );
+  const isSuppressed =
+    Boolean(incident?.memory?.suppressed_by_memory) ||
+    (incident?.memory?.adjustment?.applied &&
+      incident.memory.adjustment.dominant === "false_alarm" &&
+      incident.state === "REJECTED");
+
   // Unified -1..+1 scale mapped to 0..100%
   const barPercent = Math.max(0, Math.min(100, ((fused + 1) / 2) * 100));
+  const preBarPercent =
+    preMemoryFused !== undefined
+      ? Math.max(0, Math.min(100, ((preMemoryFused + 1) / 2) * 100))
+      : null;
   const markerPercent = ((FUSED_THRESHOLD + 1) / 2) * 100; // 67.5%
   const thresholdMet = fused > FUSED_THRESHOLD && confidence >= CONFIDENCE_THRESHOLD;
 
@@ -23,7 +38,19 @@ export function AgentTugOfWar({ incident }: { incident: Incident | null }) {
           <span className="font-sans text-panel-header text-text-primary">Agent adjudication</span>
           <span className="font-sans text-label text-text-muted">/ dual-model fusion</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {isSuppressed && (
+            <span className="flex items-center gap-1 rounded border border-purple-500/60 bg-purple-500/20 px-2 py-0.5 font-mono text-[10px] font-semibold text-purple-300">
+              <ShieldAlert className="h-3 w-3 text-purple-400" />
+              <span>
+                Suppressed by memory (
+                {incident?.memory?.adjustment?.dominant_count ??
+                  incident?.memory?.precedents?.length ??
+                  3}{" "}
+                precedents)
+              </span>
+            </span>
+          )}
           {incident?.degraded && (
             <span className="flex items-center gap-1 rounded border border-signal-pending/60 bg-signal-pending/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-signal-pending animate-pulse">
               <AlertTriangle className="h-3 w-3" />
@@ -61,6 +88,17 @@ export function AgentTugOfWar({ incident }: { incident: Incident | null }) {
           <div className="font-mono text-hero-score font-semibold text-signal-data">
             {incident ? (fused > 0 ? `+${fused.toFixed(2)}` : fused.toFixed(2)) : "0.00"}
           </div>
+          {memoryApplied && preMemoryFused !== undefined && (
+            <div className="flex items-center justify-center gap-1 font-mono text-[11px] text-text-muted">
+              <span className="text-amber-400 line-through">
+                {preMemoryFused > 0 ? `+${preMemoryFused.toFixed(2)}` : preMemoryFused.toFixed(2)}
+              </span>
+              <span>&rarr;</span>
+              <span className="text-purple-400 font-bold">
+                Δ {(fused - preMemoryFused).toFixed(2)}
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2.5">
@@ -108,6 +146,15 @@ export function AgentTugOfWar({ incident }: { incident: Incident | null }) {
             animate={{ left: `calc(${barPercent}% - 2px)` }}
             transition={{ type: "spring", stiffness: 120, damping: 14, restDelta: 0.001 }}
           />
+
+          {/* Pre-memory ghost needle (if memory adjusted) */}
+          {memoryApplied && preBarPercent !== null && (
+            <div
+              className="absolute inset-y-0 z-20 w-0 border-r-2 border-dashed border-amber-400"
+              style={{ left: `${preBarPercent}%` }}
+              title={`Pre-memory raw score: ${preMemoryFused !== undefined && preMemoryFused > 0 ? `+${preMemoryFused.toFixed(2)}` : preMemoryFused?.toFixed(2)}`}
+            />
+          )}
         </div>
 
         {/* Telemetry criteria labels */}
