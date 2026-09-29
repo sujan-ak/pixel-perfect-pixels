@@ -83,7 +83,7 @@ class MemoryService:
         self._cached_reachable: bool = False
         self._last_error: Optional[str] = None
         self._bank_ensured: bool = False
-        self._lock = asyncio.Lock()
+        self._client: Optional[Any] = None
 
     def _is_circuit_open(self) -> bool:
         if self._consecutive_failures >= 3:
@@ -113,20 +113,30 @@ class MemoryService:
     def _get_client(self) -> Optional[Any]:
         if self._custom_client is not None:
             return self._custom_client
+        if self._client is not None:
+            return self._client
 
         base_url = os.getenv("HINDSIGHT_URL", "https://api.hindsight.vectorize.io")
         api_key = os.getenv("HINDSIGHT_API_KEY")
 
-        # If base_url or api_key is missing or placeholder, client cannot make network calls
         if not base_url or not base_url.strip() or base_url.startswith("http://<"):
             return None
 
         try:
             from hindsight_client import Hindsight
-            return Hindsight(base_url=base_url.strip(), api_key=api_key.strip() if api_key else None)
+            self._client = Hindsight(base_url=base_url.strip(), api_key=api_key.strip() if api_key else None)
+            return self._client
         except Exception as e:
             logger.debug("Could not construct Hindsight client: %s", e)
             return None
+
+    async def aclose(self) -> None:
+        if self._client is not None and hasattr(self._client, "aclose"):
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
+        self._client = None
 
     async def ensure_bank(self) -> bool:
         """Create bank if missing with appropriate traffic monitoring disposition and mission."""
